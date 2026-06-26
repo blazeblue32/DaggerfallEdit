@@ -1,0 +1,140 @@
+diff --git a/src/DaggerfallEdit.Cli/Program.cs b/src/DaggerfallEdit.Cli/Program.cs
+index 02afa70..b0dfd95 100644
+--- a/src/DaggerfallEdit.Cli/Program.cs
++++ b/src/DaggerfallEdit.Cli/Program.cs
+@@ -123,6 +123,8 @@ if (!string.IsNullOrWhiteSpace(arena2Path))
+     Console.WriteLine($"Loaded {vanillaRecords.Count} vanilla MapId record(s) from MAPS.BSA.");
+ }
+ 
++List<MapIdRecord> allRecords = records.ToList();
++
+ if (filterMapId.HasValue)
+ {
+     records = records
+@@ -145,7 +147,7 @@ Console.WriteLine();
+ 
+ cache?.Save();
+ 
+-PrintConflicts(records, filterMapId.HasValue || filterLocationId.HasValue, minSeverity);
++PrintConflicts(records, filterMapId.HasValue || filterLocationId.HasValue, minSeverity, allRecords);
+ 
+ if (outWriter != null)
+ {
+@@ -317,8 +319,16 @@ static List<MapIdRecord> LoadBaselineMapIds(string path)
+     return records;
+ }
+ 
+-static void PrintConflicts(List<MapIdRecord> records, bool showSingleAssetGroups, string minSeverity)
++static void PrintConflicts(
++    List<MapIdRecord> records,
++    bool showSingleAssetGroups,
++    string minSeverity,
++    List<MapIdRecord>? contextRecords = null)
+ {
++    contextRecords ??= records;
++
++    Dictionary<string, AssetIdentitySummary> identitySummariesByAsset = BuildIdentitySummaryLookup(contextRecords);
++
+     var groups = records
+         .GroupBy(r => new CollisionKey(GetCollisionKeyKind(r), r.MapId))
+         .OrderBy(g => SortCollisionKeyKind(g.Key.Kind))
+@@ -332,7 +342,7 @@ static void PrintConflicts(List<MapIdRecord> records, bool showSingleAssetGroups
+     foreach (var group in groups)
+     {
+         var uniqueAssets = group
+-            .GroupBy(r => $"{r.ModName}|{r.DfmodPath}|{r.AssetName}", StringComparer.OrdinalIgnoreCase)
++            .GroupBy(GetAssetKey, StringComparer.OrdinalIgnoreCase)
+             .Select(g =>
+             {
+                 MapIdRecord first = g.First();
+@@ -411,6 +421,7 @@ static void PrintConflicts(List<MapIdRecord> records, bool showSingleAssetGroups
+         else if (keyKind == "LocationId")
+         {
+             Console.WriteLine("  LocationId identity record. DFU also indexes these when enumerating maps.");
++            Console.WriteLine("  If this insert fails, DFU may log the current location MapId rather than the duplicate LocationId.");
+         }
+         else
+         {
+@@ -437,6 +448,12 @@ static void PrintConflicts(List<MapIdRecord> records, bool showSingleAssetGroups
+             Console.WriteLine($"     Name: {record.RecordName ?? "(unknown)"}");
+             Console.WriteLine($"     Source: {entry.Sources}");
+ 
++            if (identitySummariesByAsset.TryGetValue(GetAssetKey(record), out AssetIdentitySummary identitySummary))
++            {
++                Console.WriteLine($"     MapId(s): {identitySummary.MapIds}");
++                Console.WriteLine($"     LocationId(s): {identitySummary.LocationIds}");
++            }
++
+             if (entry.Count > 1)
+                 Console.WriteLine($"     Internal hits: {entry.Count}");
+ 
+@@ -454,6 +471,48 @@ static void PrintConflicts(List<MapIdRecord> records, bool showSingleAssetGroups
+     Console.WriteLine($"  Info:     {infoCount}");
+ }
+ 
++static Dictionary<string, AssetIdentitySummary> BuildIdentitySummaryLookup(List<MapIdRecord> records)
++{
++    return records
++        .GroupBy(GetAssetKey, StringComparer.OrdinalIgnoreCase)
++        .ToDictionary(
++            g => g.Key,
++            g => new AssetIdentitySummary(
++                MapIds: FormatIdentityValues(g, "MapId"),
++                LocationIds: FormatIdentityValues(g, "LocationId")),
++            StringComparer.OrdinalIgnoreCase);
++}
++
++static string FormatIdentityValues(IEnumerable<MapIdRecord> records, string keyKind)
++{
++    var values = records
++        .Where(r => GetCollisionKeyKind(r) == keyKind)
++        .GroupBy(r => r.MapId)
++        .OrderBy(g => g.Key)
++        .Select(g =>
++        {
++            string sources = string.Join(
++                " + ",
++                g.Select(r => r.Source)
++                 .Distinct(StringComparer.OrdinalIgnoreCase)
++                 .OrderBy(source => source));
++
++            return string.IsNullOrWhiteSpace(sources)
++                ? g.Key.ToString()
++                : $"{g.Key} ({sources})";
++        })
++        .ToList();
++
++    return values.Count == 0
++        ? "(none found)"
++        : string.Join(", ", values);
++}
++
++static string GetAssetKey(MapIdRecord record)
++{
++    return $"{record.ModName}|{record.DfmodPath}|{record.AssetName}";
++}
++
+ static ConflictClassification ClassifyConflict(List<MapIdRecord> records, string keyKind)
+ {
+     int newLocationCount = records.Count(r => r.AssetKind == "NewLocation");
+@@ -476,7 +535,7 @@ static ConflictClassification ClassifyConflict(List<MapIdRecord> records, string
+             return new ConflictClassification(
+                 Severity: "CRITICAL",
+                 Title: "New location LocationId collision.",
+-                Explanation: "Multiple locationnew-* assets share the same LocationId. New locations should have unique LocationIds as well as unique map-pixel MapIds.");
++                Explanation: "Multiple locationnew-* assets share the same LocationId. New locations should have unique LocationIds as well as unique map-pixel MapIds. DFU can report this as a MapId collision because it logs the current location MapId for either dictionary insert failure.");
+         }
+ 
+         if (hasNewLocation)
+@@ -649,6 +708,11 @@ static void PrintUsage()
+ 	Console.WriteLine("  DaggerfallEdit.Cli --mods <mods-root-folder> --arena2 <arena2-folder> --no-cache");
+ }
+ 
++public sealed record AssetIdentitySummary(
++    string MapIds,
++    string LocationIds
++);
++
+ public sealed record CollisionKey(
+     string Kind,
+     int Value

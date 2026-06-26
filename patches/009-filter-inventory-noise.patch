@@ -1,0 +1,238 @@
+diff --git a/src/DaggerfallEdit.AssetStudio/AssetStudioAssetInventoryExtractor.cs b/src/DaggerfallEdit.AssetStudio/AssetStudioAssetInventoryExtractor.cs
+index 9ba6e79..4c74688 100644
+--- a/src/DaggerfallEdit.AssetStudio/AssetStudioAssetInventoryExtractor.cs
++++ b/src/DaggerfallEdit.AssetStudio/AssetStudioAssetInventoryExtractor.cs
+@@ -31,6 +31,7 @@ public static class AssetStudioAssetInventoryExtractor
+                     : $"{className}_{pathId}";
+ 
+                 string semanticKind = ClassifySemanticKind(className, assetName);
++                string duplicatePolicy = ClassifyDuplicatePolicy(className, assetName, semanticKind, hasStableName);
+                 string identityKey = BuildIdentityKey(className, assetName, semanticKind, hasStableName, pathId);
+ 
+                 yield return new AssetInventoryRecord(
+@@ -42,7 +43,9 @@ public static class AssetStudioAssetInventoryExtractor
+                     SemanticKind: semanticKind,
+                     IdentityKey: identityKey,
+                     ByteLength: TryGetKnownPayloadLength(obj, className),
+-                    ContainerPath: containerPath);
++                    ContainerPath: containerPath,
++                    HasStableName: hasStableName,
++                    DuplicatePolicy: duplicatePolicy);
+             }
+         }
+     }
+@@ -60,6 +63,9 @@ public static class AssetStudioAssetInventoryExtractor
+     {
+         if (className.Equals("TextAsset", StringComparison.OrdinalIgnoreCase))
+         {
++            if (IsKnownModMetadataAsset(assetName))
++                return "ModMetadata";
++
+             if (assetName.StartsWith("locationnew-", StringComparison.OrdinalIgnoreCase))
+                 return "NewLocation";
+ 
+@@ -95,6 +101,50 @@ public static class AssetStudioAssetInventoryExtractor
+         };
+     }
+ 
++    private static string ClassifyDuplicatePolicy(
++        string className,
++        string assetName,
++        string semanticKind,
++        bool hasStableName)
++    {
++        if (!hasStableName)
++            return "Suppressed: unnamed Unity object";
++
++        if (semanticKind.Equals("ModMetadata", StringComparison.OrdinalIgnoreCase))
++            return "Suppressed: per-mod metadata/settings asset";
++
++        if (semanticKind.Equals("AssetBundleMetadata", StringComparison.OrdinalIgnoreCase))
++            return "Suppressed: AssetBundle metadata";
++
++        if (semanticKind.Equals("ShaderReplacement", StringComparison.OrdinalIgnoreCase) ||
++            semanticKind.Equals("ScriptReference", StringComparison.OrdinalIgnoreCase))
++        {
++            return "Suppressed: embedded Unity dependency/reference";
++        }
++
++        if (semanticKind.Equals("MonoBehaviourData", StringComparison.OrdinalIgnoreCase) ||
++            semanticKind.Equals("AnimatorData", StringComparison.OrdinalIgnoreCase) ||
++            className.Equals("Transform", StringComparison.OrdinalIgnoreCase) ||
++            className.Equals("MeshFilter", StringComparison.OrdinalIgnoreCase) ||
++            className.Equals("MeshRenderer", StringComparison.OrdinalIgnoreCase) ||
++            className.Equals("SkinnedMeshRenderer", StringComparison.OrdinalIgnoreCase) ||
++            className.Equals("Object", StringComparison.OrdinalIgnoreCase) ||
++            className.Equals("Avatar", StringComparison.OrdinalIgnoreCase))
++        {
++            return "Suppressed: Unity component/internal object";
++        }
++
++        return "Report: potential override identity";
++    }
++
++    private static bool IsKnownModMetadataAsset(string assetName)
++    {
++        return assetName.Equals("modsettings", StringComparison.OrdinalIgnoreCase) ||
++               assetName.Equals("modpresets", StringComparison.OrdinalIgnoreCase) ||
++               assetName.Equals("modmanifest", StringComparison.OrdinalIgnoreCase) ||
++               assetName.Equals("modinfo", StringComparison.OrdinalIgnoreCase);
++    }
++
+     private static bool LooksLikeExistingLocationAsset(string assetName)
+     {
+         if (!assetName.StartsWith("location-", StringComparison.OrdinalIgnoreCase))
+diff --git a/src/DaggerfallEdit.Cli/Program.cs b/src/DaggerfallEdit.Cli/Program.cs
+index f74a792..c3125e5 100644
+--- a/src/DaggerfallEdit.Cli/Program.cs
++++ b/src/DaggerfallEdit.Cli/Program.cs
+@@ -27,6 +27,7 @@ string cacheDir = ".dfedit-cache";
+ bool noCache = false;
+ bool rebuildCache = false;
+ bool inventory = false;
++bool inventoryAllDuplicates = false;
+ 
+ for (int i = 2; i < args.Length; i++)
+ {
+@@ -81,6 +82,10 @@ for (int i = 2; i < args.Length; i++)
+     {
+         inventory = true;
+     }
++    else if (args[i] == "--inventory-all-duplicates")
++    {
++        inventoryAllDuplicates = true;
++    }
+ }
+ 
+ TextWriter originalOut = Console.Out;
+@@ -114,7 +119,7 @@ if (inventory)
+     List<AssetInventoryRecord> inventoryRecords = ScanDfmodInventory(root);
+ 
+     Console.WriteLine();
+-    PrintAssetInventory(inventoryRecords);
++    PrintAssetInventory(inventoryRecords, inventoryAllDuplicates);
+ 
+     FinishOutput(outWriter, originalOut, outPath);
+     return 0;
+@@ -365,7 +370,7 @@ static List<MapIdRecord> LoadBaselineMapIds(string path)
+     return records;
+ }
+ 
+-static void PrintAssetInventory(List<AssetInventoryRecord> records)
++static void PrintAssetInventory(List<AssetInventoryRecord> records, bool includeSuppressedDuplicateGroups)
+ {
+     Console.WriteLine("Asset inventory");
+     Console.WriteLine(new string('=', 80));
+@@ -394,39 +399,64 @@ static void PrintAssetInventory(List<AssetInventoryRecord> records)
+     }
+ 
+     Console.WriteLine();
+-    Console.WriteLine("Duplicate asset identities across mods/files:");
++    Console.WriteLine("Duplicate policy counts:");
++    foreach (var group in records
++                 .GroupBy(r => r.DuplicatePolicy, StringComparer.OrdinalIgnoreCase)
++                 .OrderByDescending(g => g.Count())
++                 .ThenBy(g => g.Key))
++    {
++        Console.WriteLine($"  {group.Key}: {group.Count()}");
++    }
++
++    Console.WriteLine();
++    Console.WriteLine("Potential override identity duplicates across mods/files:");
+ 
+-    var duplicateGroups = records
++    var allDuplicateGroups = records
+         .GroupBy(r => r.IdentityKey, StringComparer.OrdinalIgnoreCase)
+         .Select(g => new
+         {
+             IdentityKey = g.Key,
+             Records = g.ToList(),
+             SourceCount = g.Select(r => r.DfmodPath).Distinct(StringComparer.OrdinalIgnoreCase).Count(),
+-            ModCount = g.Select(r => r.ModName).Distinct(StringComparer.OrdinalIgnoreCase).Count()
++            ModCount = g.Select(r => r.ModName).Distinct(StringComparer.OrdinalIgnoreCase).Count(),
++            IsReportable = g.Any(r => IsReportableInventoryDuplicate(r))
+         })
+         .Where(g => g.SourceCount > 1)
+-        .OrderByDescending(g => g.ModCount)
++        .OrderByDescending(g => g.IsReportable)
++        .ThenByDescending(g => g.ModCount)
+         .ThenByDescending(g => g.SourceCount)
+         .ThenBy(g => g.IdentityKey)
+         .ToList();
+ 
+-    if (duplicateGroups.Count == 0)
++    var duplicateGroups = allDuplicateGroups
++        .Where(g => includeSuppressedDuplicateGroups || g.IsReportable)
++        .ToList();
++
++    int suppressedDuplicateGroupCount = allDuplicateGroups.Count - allDuplicateGroups.Count(g => g.IsReportable);
++
++    if (allDuplicateGroups.Count == 0)
+     {
+         Console.WriteLine("  None found.");
+         return;
+     }
+ 
+-    Console.WriteLine($"  Found {duplicateGroups.Count} duplicate asset identity group(s).");
++    Console.WriteLine($"  Reported duplicate group(s): {duplicateGroups.Count}");
++    Console.WriteLine($"  Suppressed noisy duplicate group(s): {suppressedDuplicateGroupCount}");
++
++    if (!includeSuppressedDuplicateGroups && suppressedDuplicateGroupCount > 0)
++        Console.WriteLine("  Use --inventory-all-duplicates to include suppressed metadata/dependency/internal Unity groups.");
++
+     Console.WriteLine();
+ 
+     foreach (var group in duplicateGroups)
+     {
+         AssetInventoryRecord first = group.Records.First();
++        string label = group.IsReportable ? "POTENTIAL OVERRIDE" : "SUPPRESSED DUPLICATE";
+ 
+-        Console.WriteLine($"DUPLICATE: {group.IdentityKey}");
++        Console.WriteLine($"{label}: {group.IdentityKey}");
+         Console.WriteLine($"  Class: {first.ClassName}");
+         Console.WriteLine($"  Semantic Kind: {first.SemanticKind}");
++        Console.WriteLine($"  Duplicate Policy: {first.DuplicatePolicy}");
+         Console.WriteLine($"  Mods: {group.ModCount}");
+         Console.WriteLine($"  DFMod files: {group.SourceCount}");
+ 
+@@ -443,6 +473,7 @@ static void PrintAssetInventory(List<AssetInventoryRecord> records)
+             Console.WriteLine($"     Asset: {record.AssetName}");
+             Console.WriteLine($"     Class: {record.ClassName}");
+             Console.WriteLine($"     PathID: {record.PathId}");
++            Console.WriteLine($"     Duplicate Policy: {record.DuplicatePolicy}");
+ 
+             if (record.ByteLength.HasValue)
+                 Console.WriteLine($"     Payload Bytes: {record.ByteLength.Value}");
+@@ -457,6 +488,11 @@ static void PrintAssetInventory(List<AssetInventoryRecord> records)
+     }
+ }
+ 
++static bool IsReportableInventoryDuplicate(AssetInventoryRecord record)
++{
++    return record.DuplicatePolicy.StartsWith("Report:", StringComparison.OrdinalIgnoreCase);
++}
++
+ static void PrintConflicts(
+     List<MapIdRecord> records,
+     bool showSingleAssetGroups,
+@@ -846,6 +882,7 @@ static void PrintUsage()
+     Console.WriteLine("  DaggerfallEdit.Cli --loose <folder>");
+     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder>");
+     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --inventory --out <inventory-report.txt>");
++    Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --inventory --inventory-all-duplicates");
+     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --filter-mapid <id>");
+     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --filter-locationid <id>");
+     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --baseline <mapids.txt>");
+diff --git a/src/DaggerfallEdit.Core/AssetInventoryRecord.cs b/src/DaggerfallEdit.Core/AssetInventoryRecord.cs
+index 370d08f..e0ae749 100644
+--- a/src/DaggerfallEdit.Core/AssetInventoryRecord.cs
++++ b/src/DaggerfallEdit.Core/AssetInventoryRecord.cs
+@@ -9,5 +9,7 @@ public sealed record AssetInventoryRecord(
+     string SemanticKind,
+     string IdentityKey,
+     long? ByteLength,
+-    string? ContainerPath
++    string? ContainerPath,
++    bool HasStableName,
++    string DuplicatePolicy
+ );

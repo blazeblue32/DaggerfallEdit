@@ -1,0 +1,481 @@
+diff --git a/src/DaggerfallEdit.Vanilla/BsaNameRecordReader.cs b/src/DaggerfallEdit.Vanilla/BsaNameRecordReader.cs
+new file mode 100644
+index 0000000..a2059bc
+--- /dev/null
++++ b/src/DaggerfallEdit.Vanilla/BsaNameRecordReader.cs
+@@ -0,0 +1,105 @@
++using System.Buffers.Binary;
++using System.Text;
++
++namespace DaggerfallEdit.Vanilla;
++
++public sealed record BsaNameRecord(
++    string Name,
++    int Offset,
++    int Length
++);
++
++public sealed class BsaNameRecordReader
++{
++    private const ushort NameRecordBsaType = 0x0100;
++    private const int HeaderLength = 4;
++    private const int NameRecordDescriptorLength = 18;
++    private const int NameLength = 12;
++
++    private readonly byte[] data;
++    private readonly Dictionary<string, BsaNameRecord> recordsByName;
++
++    private BsaNameRecordReader(byte[] data, List<BsaNameRecord> records)
++    {
++        this.data = data;
++        Records = records;
++        recordsByName = records.ToDictionary(
++            record => record.Name,
++            StringComparer.OrdinalIgnoreCase);
++    }
++
++    public IReadOnlyList<BsaNameRecord> Records { get; }
++
++    public static BsaNameRecordReader Load(string path)
++    {
++        byte[] data = File.ReadAllBytes(path);
++
++        if (data.Length < HeaderLength)
++            throw new InvalidDataException($"BSA file is too small: {path}");
++
++        ushort recordCount = BinaryPrimitives.ReadUInt16LittleEndian(data.AsSpan(0, 2));
++        ushort bsaType = BinaryPrimitives.ReadUInt16LittleEndian(data.AsSpan(2, 2));
++
++        if (bsaType != NameRecordBsaType)
++            throw new InvalidDataException($"Expected NameRecord BSA type 0x0100, got 0x{bsaType:x4}: {path}");
++
++        int footerLength = checked(recordCount * NameRecordDescriptorLength);
++        int footerOffset = data.Length - footerLength;
++
++        if (footerOffset < HeaderLength)
++            throw new InvalidDataException($"Invalid BSA footer offset: {path}");
++
++        var records = new List<BsaNameRecord>(recordCount);
++        int recordOffset = HeaderLength;
++
++        for (int i = 0; i < recordCount; i++)
++        {
++            int descriptorOffset = footerOffset + i * NameRecordDescriptorLength;
++
++            string name = ReadFixedAscii(data.AsSpan(descriptorOffset, NameLength));
++            short compressed = BinaryPrimitives.ReadInt16LittleEndian(data.AsSpan(descriptorOffset + 12, 2));
++            int recordLength = BinaryPrimitives.ReadInt32LittleEndian(data.AsSpan(descriptorOffset + 14, 4));
++
++            if (compressed != 0)
++                throw new NotSupportedException($"Compressed BSA NameRecord entries are not supported: {name}");
++
++            if (recordLength < 0 || recordOffset + recordLength > footerOffset)
++                throw new InvalidDataException($"Invalid BSA NameRecord length for {name}: {recordLength}");
++
++            records.Add(new BsaNameRecord(name, recordOffset, recordLength));
++            recordOffset += recordLength;
++        }
++
++        return new BsaNameRecordReader(data, records);
++    }
++
++    public bool TryGetRecord(string name, out ReadOnlyMemory<byte> bytes)
++    {
++        if (!recordsByName.TryGetValue(name, out BsaNameRecord? record))
++        {
++            bytes = ReadOnlyMemory<byte>.Empty;
++            return false;
++        }
++
++        bytes = new ReadOnlyMemory<byte>(data, record.Offset, record.Length);
++        return true;
++    }
++
++    public ReadOnlyMemory<byte> GetRecord(string name)
++    {
++        if (!TryGetRecord(name, out ReadOnlyMemory<byte> bytes))
++            throw new KeyNotFoundException($"BSA NameRecord not found: {name}");
++
++        return bytes;
++    }
++
++    private static string ReadFixedAscii(ReadOnlySpan<byte> bytes)
++    {
++        int length = bytes.IndexOf((byte)0);
++
++        if (length < 0)
++            length = bytes.Length;
++
++        return Encoding.ASCII.GetString(bytes[..length]).TrimEnd();
++    }
++}
+diff --git a/src/DaggerfallEdit.Vanilla/MapsBsaBaselineExtractor.cs b/src/DaggerfallEdit.Vanilla/MapsBsaBaselineExtractor.cs
+new file mode 100644
+index 0000000..7286494
+--- /dev/null
++++ b/src/DaggerfallEdit.Vanilla/MapsBsaBaselineExtractor.cs
+@@ -0,0 +1,181 @@
++using System.Buffers.Binary;
++using System.Text;
++using System.Text.RegularExpressions;
++using DaggerfallEdit.Core;
++
++namespace DaggerfallEdit.Vanilla;
++
++public static class MapsBsaBaselineExtractor
++{
++    private const int CollisionMapIdMask = 0x000fffff;
++    private const int MapNameLength = 32;
++    private const int MapTableEntryLength = 17;
++
++    private static readonly Regex MapNamesRecordRegex = new(
++        @"^MAPNAMES\.(\d{3})$",
++        RegexOptions.IgnoreCase | RegexOptions.Compiled);
++
++    private static readonly string[] RegionNames =
++    {
++        "Alik'r Desert", "Dragontail Mountains", "Glenpoint Foothills", "Daggerfall Bluffs",
++        "Yeorth Burrowland", "Dwynnen", "Ravennian Forest", "Devilrock",
++        "Malekna Forest", "Isle of Balfiera", "Bantha", "Dak'fron",
++        "Islands in the Western Iliac Bay", "Tamarilyn Point", "Lainlyn Cliffs", "Bjoulsae River",
++        "Wrothgarian Mountains", "Daggerfall", "Glenpoint", "Betony", "Sentinel", "Anticlere", "Lainlyn", "Wayrest",
++        "Gen Tem High Rock village", "Gen Rai Hammerfell village", "Orsinium Area", "Skeffington Wood",
++        "Hammerfell bay coast", "Hammerfell sea coast", "High Rock bay coast", "High Rock sea coast",
++        "Northmoor", "Menevia", "Alcaire", "Koegria", "Bhoriane", "Kambria", "Phrygias", "Urvaius",
++        "Ykalon", "Daenia", "Shalgora", "Abibon-Gora", "Kairou", "Pothago", "Myrkwasa", "Ayasofya",
++        "Tigonus", "Kozanset", "Satakalaam", "Totambu", "Mournoth", "Ephesus", "Santaki", "Antiphyllos",
++        "Bergama", "Gavaudon", "Tulune", "Glenumbra Moors", "Ilessan Hills", "Cybiades"
++    };
++
++    public static List<MapIdRecord> ExtractVanillaMapIds(string arena2Path)
++    {
++        string mapsPath = Path.Combine(arena2Path, "MAPS.BSA");
++
++        if (!File.Exists(mapsPath))
++            throw new FileNotFoundException("Could not find MAPS.BSA.", mapsPath);
++
++        BsaNameRecordReader bsa = BsaNameRecordReader.Load(mapsPath);
++        var records = new List<MapIdRecord>();
++
++        foreach (int regionIndex in GetRegionIndices(bsa))
++        {
++            string mapNamesRecord = $"MAPNAMES.{regionIndex:000}";
++            string mapTableRecord = $"MAPTABLE.{regionIndex:000}";
++
++            if (!bsa.TryGetRecord(mapNamesRecord, out ReadOnlyMemory<byte> mapNamesBytes) ||
++                !bsa.TryGetRecord(mapTableRecord, out ReadOnlyMemory<byte> mapTableBytes))
++            {
++                continue;
++            }
++
++            List<string> mapNames = ReadMapNames(mapNamesBytes.Span, mapNamesRecord);
++            List<MapTableEntry> mapTable = ReadMapTable(mapTableBytes.Span, mapNames.Count, mapTableRecord);
++            string regionName = GetRegionName(regionIndex);
++
++            for (int locationIndex = 0; locationIndex < mapTable.Count; locationIndex++)
++            {
++                MapTableEntry entry = mapTable[locationIndex];
++                string locationName = locationIndex < mapNames.Count
++                    ? mapNames[locationIndex]
++                    : string.Empty;
++
++                int x = entry.CollisionMapId % 1000;
++                int y = (entry.CollisionMapId - x) / 1000;
++
++                records.Add(new MapIdRecord(
++                    MapId: entry.CollisionMapId,
++                    X: x,
++                    Y: y,
++                    Longitude: entry.Longitude,
++                    Latitude: entry.Latitude,
++                    ModName: "[Vanilla MAPS.BSA]",
++                    DfmodPath: mapsPath,
++                    AssetName: $"vanilla-location-{regionIndex}-{locationIndex}",
++                    JsonPath: $"{regionName}[{regionIndex}].{mapTableRecord}[{locationIndex}] rawMapId={entry.RawMapId}",
++                    RecordName: string.IsNullOrWhiteSpace(locationName) ? null : locationName,
++                    AssetKind: "Baseline",
++                    Source: "Vanilla MAPS.BSA collision key"));
++            }
++        }
++
++        if (records.Count == 0)
++            throw new InvalidDataException($"No MAPNAMES/MAPTABLE location records were found in: {mapsPath}");
++
++        return records;
++    }
++
++    private static IEnumerable<int> GetRegionIndices(BsaNameRecordReader bsa)
++    {
++        return bsa.Records
++            .Select(record => MapNamesRecordRegex.Match(record.Name))
++            .Where(match => match.Success)
++            .Select(match => int.Parse(match.Groups[1].Value))
++            .Distinct()
++            .OrderBy(regionIndex => regionIndex);
++    }
++
++    private static List<string> ReadMapNames(ReadOnlySpan<byte> bytes, string recordName)
++    {
++        if (bytes.Length < 4)
++            throw new InvalidDataException($"{recordName} is too small to contain a location count.");
++
++        uint count = BinaryPrimitives.ReadUInt32LittleEndian(bytes[..4]);
++        long expectedLength = 4L + count * MapNameLength;
++
++        if (expectedLength > bytes.Length)
++            throw new InvalidDataException($"{recordName} declares {count} location name(s), but the record is truncated.");
++
++        int countInt = checked((int)count);
++        var names = new List<string>(countInt);
++
++        for (int i = 0; i < countInt; i++)
++        {
++            int offset = 4 + i * MapNameLength;
++            names.Add(ReadFixedAscii(bytes.Slice(offset, MapNameLength)));
++        }
++
++        return names;
++    }
++
++    private static List<MapTableEntry> ReadMapTable(ReadOnlySpan<byte> bytes, int locationCount, string recordName)
++    {
++        int expectedLength = checked(locationCount * MapTableEntryLength);
++
++        if (bytes.Length < expectedLength)
++            throw new InvalidDataException($"{recordName} is too small for {locationCount} map table entry/entries.");
++
++        var entries = new List<MapTableEntry>(locationCount);
++
++        for (int i = 0; i < locationCount; i++)
++        {
++            int offset = i * MapTableEntryLength;
++
++            int rawMapId = BinaryPrimitives.ReadInt32LittleEndian(bytes.Slice(offset, 4));
++            uint firstBitfield = BinaryPrimitives.ReadUInt32LittleEndian(bytes.Slice(offset + 4, 4));
++            int secondBitfield = BinaryPrimitives.ReadInt32LittleEndian(bytes.Slice(offset + 8, 4));
++
++            // Mirrors Daggerfall Unity's MapsFile.ReadMapTable() field naming.
++            // UESP documents these packed fields as LatitudeType and LongitudeType,
++            // but DFU assigns the first packed field to Longitude and the second to Latitude.
++            int longitude = (int)(firstBitfield & 0x01ffffffu) >> 8;
++            int latitude = (secondBitfield & 0x00ffffff) >> 8;
++            int collisionMapId = rawMapId & CollisionMapIdMask;
++
++            entries.Add(new MapTableEntry(
++                RawMapId: rawMapId,
++                CollisionMapId: collisionMapId,
++                Longitude: longitude,
++                Latitude: latitude));
++        }
++
++        return entries;
++    }
++
++    private static string GetRegionName(int regionIndex)
++    {
++        if (regionIndex >= 0 && regionIndex < RegionNames.Length)
++            return RegionNames[regionIndex];
++
++        return $"Region {regionIndex}";
++    }
++
++    private static string ReadFixedAscii(ReadOnlySpan<byte> bytes)
++    {
++        int length = bytes.IndexOf((byte)0);
++
++        if (length < 0)
++            length = bytes.Length;
++
++        return Encoding.ASCII.GetString(bytes[..length]).TrimEnd();
++    }
++
++    private sealed record MapTableEntry(
++        int RawMapId,
++        int CollisionMapId,
++        int Longitude,
++        int Latitude
++    );
++}
+diff --git a/src/DaggerfallEdit.Vanilla/VanillaMapIdExtractor.cs b/src/DaggerfallEdit.Vanilla/VanillaMapIdExtractor.cs
+index 1651a1f..fea28d8 100644
+--- a/src/DaggerfallEdit.Vanilla/VanillaMapIdExtractor.cs
++++ b/src/DaggerfallEdit.Vanilla/VanillaMapIdExtractor.cs
+@@ -1,166 +1,11 @@
+-using System.Reflection;
+-using DaggerfallEdit.Core;
+-
+-namespace DaggerfallEdit.Vanilla;
+-
+-public static class VanillaMapIdExtractor
+-{
+-    public static List<MapIdRecord> ExtractVanillaMapIds(string arena2Path)
+-    {
+-        string mapsPath = Path.Combine(arena2Path, "MAPS.BSA");
+-
+-        if (!File.Exists(mapsPath))
+-            throw new FileNotFoundException("Could not find MAPS.BSA.", mapsPath);
+-
+-        string managedDir = FindManagedDirectory(arena2Path);
+-        string assemblyPath = Path.Combine(managedDir, "Assembly-CSharp.dll");
+-
+-        if (!File.Exists(assemblyPath))
+-            throw new FileNotFoundException("Could not find Assembly-CSharp.dll.", assemblyPath);
+-
+-        RegisterAssemblyResolver(managedDir);
+-
+-        Assembly assembly = Assembly.LoadFrom(assemblyPath);
+-
+-        Type mapsFileType = assembly.GetType("DaggerfallConnect.Arena2.MapsFile")
+-            ?? throw new InvalidOperationException("Could not find DaggerfallConnect.Arena2.MapsFile.");
+-
+-        Type fileUsageType = assembly.GetType("DaggerfallConnect.FileUsage")
+-            ?? throw new InvalidOperationException("Could not find DaggerfallConnect.FileUsage.");
+-
+-        object useMemory = Enum.Parse(fileUsageType, "UseMemory");
+-
+-        object mapsFile = Activator.CreateInstance(mapsFileType)
+-            ?? throw new InvalidOperationException("Could not create MapsFile instance.");
+-
+-        MethodInfo loadMethod = mapsFileType.GetMethod("Load")
+-            ?? throw new InvalidOperationException("Could not find MapsFile.Load().");
+-
+-        bool loaded = (bool)(loadMethod.Invoke(mapsFile, new[] { mapsPath, useMemory, true }) ?? false);
+-
+-        if (!loaded)
+-            throw new InvalidOperationException($"MapsFile.Load() failed for: {mapsPath}");
+-
+-        PropertyInfo? autoDiscardProperty = mapsFileType.GetProperty("AutoDiscard");
+-        autoDiscardProperty?.SetValue(mapsFile, false);
+-
+-        PropertyInfo regionCountProperty = mapsFileType.GetProperty("RegionCount")
+-            ?? throw new InvalidOperationException("Could not find MapsFile.RegionCount.");
+-
+-        int regionCount = Convert.ToInt32(regionCountProperty.GetValue(mapsFile));
+-
+-        MethodInfo getRegionMethod = mapsFileType.GetMethod("GetRegion", new[] { typeof(int) })
+-            ?? throw new InvalidOperationException("Could not find MapsFile.GetRegion(int).");
+-
+-        var records = new List<MapIdRecord>();
+-
+-        for (int regionIndex = 0; regionIndex < regionCount; regionIndex++)
+-        {
+-            object? region = getRegionMethod.Invoke(mapsFile, new object[] { regionIndex });
+-
+-            if (region == null)
+-                continue;
+-
+-            string regionName = GetMemberValue(region, "Name")?.ToString() ?? $"Region {regionIndex}";
+-
+-            Array? mapTable = GetMemberValue(region, "MapTable") as Array;
+-            Array? mapNames = GetMemberValue(region, "MapNames") as Array;
+-
+-            if (mapTable == null)
+-                continue;
+-
+-            for (int locationIndex = 0; locationIndex < mapTable.Length; locationIndex++)
+-            {
+-                object? mapTableEntry = mapTable.GetValue(locationIndex);
+-
+-                if (mapTableEntry == null)
+-                    continue;
+-
+-                int mapId = Convert.ToInt32(GetMemberValue(mapTableEntry, "MapId") ?? 0);
+-                int longitude = Convert.ToInt32(GetMemberValue(mapTableEntry, "Longitude") ?? 0);
+-                int latitude = Convert.ToInt32(GetMemberValue(mapTableEntry, "Latitude") ?? 0);
+-
+-                string? locationName = null;
+-
+-                if (mapNames != null && locationIndex < mapNames.Length)
+-                    locationName = mapNames.GetValue(locationIndex)?.ToString();
+-
+-                records.Add(new MapIdRecord(
+-                    MapId: mapId,
+-                    X: null,
+-                    Y: null,
+-                    Longitude: longitude,
+-                    Latitude: latitude,
+-                    ModName: "[Vanilla MAPS.BSA]",
+-                    DfmodPath: mapsPath,
+-                    AssetName: $"vanilla-location-{regionIndex}-{locationIndex}",
+-                    JsonPath: $"{regionName}[{regionIndex}].Location[{locationIndex}]",
+-                    RecordName: locationName,
+-                    AssetKind: "Baseline",
+-                    Source: "Vanilla MAPS.BSA"));
+-            }
+-        }
+-
+-        return records;
+-    }
+-
+-    private static object? GetMemberValue(object obj, string name)
+-    {
+-        Type type = obj.GetType();
+-
+-        PropertyInfo? property = type.GetProperty(
+-            name,
+-            BindingFlags.Public | BindingFlags.Instance);
+-
+-        if (property != null)
+-            return property.GetValue(obj);
+-
+-        FieldInfo? field = type.GetField(
+-            name,
+-            BindingFlags.Public | BindingFlags.Instance);
+-
+-        if (field != null)
+-            return field.GetValue(obj);
+-
+-        return null;
+-    }
+-
+-    private static string FindManagedDirectory(string arena2Path)
+-    {
+-        DirectoryInfo? current = new DirectoryInfo(Path.GetFullPath(arena2Path));
+-
+-        while (current != null)
+-        {
+-            string directManaged = Path.Combine(current.FullName, "Managed");
+-            string directAssembly = Path.Combine(directManaged, "Assembly-CSharp.dll");
+-
+-            if (File.Exists(directAssembly))
+-                return directManaged;
+-
+-            string unityDataManaged = Path.Combine(current.FullName, "DaggerfallUnity_Data", "Managed");
+-            string unityDataAssembly = Path.Combine(unityDataManaged, "Assembly-CSharp.dll");
+-
+-            if (File.Exists(unityDataAssembly))
+-                return unityDataManaged;
+-
+-            current = current.Parent;
+-        }
+-
+-        throw new DirectoryNotFoundException(
+-            "Could not find DaggerfallUnity_Data\\Managed or Managed containing Assembly-CSharp.dll.");
+-    }
+-
+-    private static void RegisterAssemblyResolver(string managedDir)
+-    {
+-        AppDomain.CurrentDomain.AssemblyResolve += (_, args) =>
+-        {
+-            string assemblyName = new AssemblyName(args.Name).Name ?? string.Empty;
+-            string candidate = Path.Combine(managedDir, assemblyName + ".dll");
+-
+-            if (File.Exists(candidate))
+-                return Assembly.LoadFrom(candidate);
+-
+-            return null;
+-        };
+-    }
+-}
+\ No newline at end of file
++using DaggerfallEdit.Core;
++
++namespace DaggerfallEdit.Vanilla;
++
++public static class VanillaMapIdExtractor
++{
++    public static List<MapIdRecord> ExtractVanillaMapIds(string arena2Path)
++    {
++        return MapsBsaBaselineExtractor.ExtractVanillaMapIds(arena2Path);
++    }
++}

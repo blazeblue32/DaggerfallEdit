@@ -1,0 +1,15 @@
+diff --git a/src/DaggerfallEdit.Cli/Program.cs b/src/DaggerfallEdit.Cli/Program.cs
+index 90731a3..b04c060 100644
+--- a/src/DaggerfallEdit.Cli/Program.cs
++++ b/src/DaggerfallEdit.Cli/Program.cs
+@@ -1596,10 +1596,6 @@ static string FormatMo2LooseContentOrder(LooseContentRecord record)
+     return "(not matched)";
+ }
+ 
+-static bool IsReportableLooseContentDuplicate(LooseContentRecord record)
+-{
+-    return record.DuplicatePolicy.StartsWith("Report:", StringComparison.OrdinalIgnoreCase);
+-}
+ 
+ static int LooseContentKindSortRank(string contentKind)
+ {

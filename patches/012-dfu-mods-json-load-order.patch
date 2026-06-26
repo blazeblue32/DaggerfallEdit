@@ -1,0 +1,564 @@
+diff --git a/src/DaggerfallEdit.AssetStudio/AssetStudioAssetInventoryExtractor.cs b/src/DaggerfallEdit.AssetStudio/AssetStudioAssetInventoryExtractor.cs
+index 9ed598b..e610b60 100644
+--- a/src/DaggerfallEdit.AssetStudio/AssetStudioAssetInventoryExtractor.cs
++++ b/src/DaggerfallEdit.AssetStudio/AssetStudioAssetInventoryExtractor.cs
+@@ -45,7 +45,14 @@ public static class AssetStudioAssetInventoryExtractor
+                     ByteLength: TryGetKnownPayloadLength(obj, className),
+                     ContainerPath: containerPath,
+                     HasStableName: hasStableName,
+-                    DuplicatePolicy: duplicatePolicy);
++                    DuplicatePolicy: duplicatePolicy,
++                    DfuFileName: null,
++                    DfuTitle: null,
++                    DfuEnabled: null,
++                    DfuLoadPriority: null,
++                    Mo2ModName: null,
++                    Mo2Enabled: null,
++                    Mo2ListIndex: null);
+             }
+         }
+     }
+diff --git a/src/DaggerfallEdit.Cli/Program.cs b/src/DaggerfallEdit.Cli/Program.cs
+index e688673..06d4d47 100644
+--- a/src/DaggerfallEdit.Cli/Program.cs
++++ b/src/DaggerfallEdit.Cli/Program.cs
+@@ -1,4 +1,5 @@
+-﻿using DaggerfallEdit.AssetStudio;
++﻿using System.Text.Json;
++using DaggerfallEdit.AssetStudio;
+ using DaggerfallEdit.Core;
+ using DaggerfallEdit.Vanilla;
+ 
+@@ -34,6 +35,9 @@ int inventoryMaxRecordsPerGroup = 10;
+ string? inventoryKindFilter = null;
+ string? inventoryClassFilter = null;
+ string? inventoryIdentityContainsFilter = null;
++string? dfuModsJsonPath = null;
++string? mo2ModlistPath = null;
++bool inventoryActiveOnly = false;
+ 
+ for (int i = 2; i < args.Length; i++)
+ {
+@@ -125,6 +129,20 @@ for (int i = 2; i < args.Length; i++)
+         inventoryIdentityContainsFilter = args[i + 1];
+         i++;
+     }
++    else if (args[i] == "--dfu-mods-json" && i + 1 < args.Length)
++    {
++        dfuModsJsonPath = args[i + 1];
++        i++;
++    }
++    else if (args[i] == "--mo2-modlist" && i + 1 < args.Length)
++    {
++        mo2ModlistPath = args[i + 1];
++        i++;
++    }
++    else if (args[i] == "--inventory-active-only")
++    {
++        inventoryActiveOnly = true;
++    }
+ }
+ 
+ TextWriter originalOut = Console.Out;
+@@ -155,7 +173,11 @@ if (inventory)
+         return 1;
+     }
+ 
++    DfuModsJsonLoadOrder? dfuLoadOrder = LoadDfuModsJsonLoadOrder(dfuModsJsonPath);
++    Mo2ModlistLoadOrder? mo2LoadOrder = LoadMo2ModlistLoadOrder(mo2ModlistPath);
++
+     List<AssetInventoryRecord> inventoryRecords = ScanDfmodInventory(root);
++    inventoryRecords = ApplyInventoryLoadOrder(inventoryRecords, dfuLoadOrder, mo2LoadOrder);
+ 
+     Console.WriteLine();
+     PrintAssetInventory(
+@@ -167,7 +189,10 @@ if (inventory)
+             MaxRecordsPerDuplicateGroup: inventoryMaxRecordsPerGroup,
+             SemanticKindFilter: inventoryKindFilter,
+             ClassNameFilter: inventoryClassFilter,
+-            IdentityContainsFilter: inventoryIdentityContainsFilter));
++            IdentityContainsFilter: inventoryIdentityContainsFilter,
++            ActiveOnly: inventoryActiveOnly),
++        dfuLoadOrder,
++        mo2LoadOrder);
+ 
+     FinishOutput(outWriter, originalOut, outPath);
+     return 0;
+@@ -418,7 +443,11 @@ static List<MapIdRecord> LoadBaselineMapIds(string path)
+     return records;
+ }
+ 
+-static void PrintAssetInventory(List<AssetInventoryRecord> records, InventoryReportOptions options)
++static void PrintAssetInventory(
++    List<AssetInventoryRecord> records,
++    InventoryReportOptions options,
++    DfuModsJsonLoadOrder? dfuLoadOrder = null,
++    Mo2ModlistLoadOrder? mo2LoadOrder = null)
+ {
+     List<AssetInventoryRecord> reportRecords = ApplyInventoryFilters(records, options);
+ 
+@@ -441,6 +470,39 @@ static void PrintAssetInventory(List<AssetInventoryRecord> records, InventoryRep
+     if (!string.IsNullOrWhiteSpace(options.IdentityContainsFilter))
+         Console.WriteLine($"Filter: Identity contains = {options.IdentityContainsFilter}");
+ 
++    if (options.ActiveOnly)
++        Console.WriteLine("Filter: DFU enabled records only");
++
++    if (dfuLoadOrder != null)
++    {
++        int matchedDfuRecords = reportRecords.Count(r => r.DfuLoadPriority.HasValue);
++        int unmatchedDfuRecords = reportRecords.Count - matchedDfuRecords;
++
++        Console.WriteLine();
++        Console.WriteLine("DFU Mods.json load order:");
++        Console.WriteLine($"  File: {dfuLoadOrder.Path}");
++        Console.WriteLine($"  Entries: {dfuLoadOrder.Entries.Count}");
++        Console.WriteLine($"  Enabled entries: {dfuLoadOrder.Entries.Count(e => e.Enabled)}");
++        Console.WriteLine($"  Disabled entries: {dfuLoadOrder.Entries.Count(e => !e.Enabled)}");
++        Console.WriteLine($"  Records matched by .dfmod filename/title: {matchedDfuRecords}");
++        Console.WriteLine($"  Records without DFU load-order match: {unmatchedDfuRecords}");
++    }
++
++    if (mo2LoadOrder != null)
++    {
++        int matchedMo2Records = reportRecords.Count(r => r.Mo2ListIndex.HasValue);
++        int unmatchedMo2Records = reportRecords.Count - matchedMo2Records;
++
++        Console.WriteLine();
++        Console.WriteLine("MO2 modlist.txt order:");
++        Console.WriteLine($"  File: {mo2LoadOrder.Path}");
++        Console.WriteLine($"  Entries: {mo2LoadOrder.Entries.Count}");
++        Console.WriteLine($"  Enabled entries: {mo2LoadOrder.Entries.Count(e => e.Enabled)}");
++        Console.WriteLine($"  Disabled entries: {mo2LoadOrder.Entries.Count(e => !e.Enabled)}");
++        Console.WriteLine($"  Records matched by MO2 mod folder: {matchedMo2Records}");
++        Console.WriteLine($"  Records without MO2 modlist match: {unmatchedMo2Records}");
++    }
++
+     Console.WriteLine();
+ 
+     Console.WriteLine("Unity class counts:");
+@@ -548,12 +610,7 @@ static void PrintAssetInventory(List<AssetInventoryRecord> records, InventoryRep
+         Console.WriteLine($"  DFMod files: {group.SourceCount}");
+ 
+         int i = 1;
+-        var orderedRecords = group.Records
+-            .OrderBy(r => r.ModName)
+-            .ThenBy(r => r.DfmodPath)
+-            .ThenBy(r => r.AssetName)
+-            .ThenBy(r => r.PathId)
+-            .ToList();
++        var orderedRecords = OrderInventoryRecordsForDisplay(group.Records).ToList();
+ 
+         foreach (AssetInventoryRecord record in orderedRecords.Take(options.MaxRecordsPerDuplicateGroup))
+         {
+@@ -564,6 +621,25 @@ static void PrintAssetInventory(List<AssetInventoryRecord> records, InventoryRep
+             Console.WriteLine($"     PathID: {record.PathId}");
+             Console.WriteLine($"     Duplicate Policy: {record.DuplicatePolicy}");
+ 
++            if (record.DfuLoadPriority.HasValue)
++            {
++                string enabled = record.DfuEnabled == true ? "enabled" : "disabled";
++                Console.WriteLine($"     DFU Load Order: {record.DfuLoadPriority.Value} ({enabled}) {record.DfuTitle ?? record.DfuFileName ?? "(unknown)"}");
++            }
++            else
++            {
++                Console.WriteLine("     DFU Load Order: (not matched)");
++            }
++
++            if (record.Mo2ListIndex.HasValue)
++            {
++                string enabled = record.Mo2Enabled == true ? "enabled" : "disabled";
++                Console.WriteLine($"     MO2 Modlist: line/order {record.Mo2ListIndex.Value} ({enabled}) {record.Mo2ModName}");
++            }
++
++            if (IsWinningDfuRecord(record, group.Records))
++                Console.WriteLine("     Winning enabled DFU override: yes");
++
+             if (record.ByteLength.HasValue)
+                 Console.WriteLine($"     Payload Bytes: {record.ByteLength.Value}");
+ 
+@@ -605,6 +681,11 @@ static List<AssetInventoryRecord> ApplyInventoryFilters(
+             r.AssetName.Contains(options.IdentityContainsFilter, StringComparison.OrdinalIgnoreCase));
+     }
+ 
++    if (options.ActiveOnly)
++    {
++        query = query.Where(r => r.DfuEnabled == true);
++    }
++
+     return query.ToList();
+ }
+ 
+@@ -624,10 +705,213 @@ static void PrintInventoryDuplicateOverview(
+         AssetInventoryRecord first = group.Records.First();
+         string label = group.IsReportable ? "POTENTIAL" : "SUPPRESSED";
+ 
+-        Console.WriteLine($"  {label,-10} {group.ModCount,3} mod(s), {group.SourceCount,3} file(s) | {first.ClassName} | {first.SemanticKind} | {group.IdentityKey}");
++        string winner = FormatDfuWinner(group.Records);
++        Console.WriteLine($"  {label,-10} {group.ModCount,3} mod(s), {group.SourceCount,3} file(s) | {first.ClassName} | {first.SemanticKind} | {group.IdentityKey} | winner: {winner}");
+     }
+ }
+ 
++
++static DfuModsJsonLoadOrder? LoadDfuModsJsonLoadOrder(string? path)
++{
++    if (string.IsNullOrWhiteSpace(path))
++        return null;
++
++    if (!File.Exists(path))
++    {
++        Console.WriteLine($"WARN: DFU Mods.json file does not exist: {path}");
++        return null;
++    }
++
++    try
++    {
++        using FileStream stream = File.OpenRead(path);
++        using JsonDocument document = JsonDocument.Parse(stream);
++
++        var entries = new List<DfuModEntry>();
++        int index = 0;
++
++        foreach (JsonElement element in document.RootElement.EnumerateArray())
++        {
++            string fileName = GetJsonString(element, "FileName") ?? string.Empty;
++            string title = GetJsonString(element, "Title") ?? fileName;
++            bool enabled = GetJsonBool(element, "Enabled") ?? true;
++            int loadPriority = GetJsonInt(element, "LoadPriority") ?? index;
++
++            if (!string.IsNullOrWhiteSpace(fileName) || !string.IsNullOrWhiteSpace(title))
++            {
++                entries.Add(new DfuModEntry(
++                    FileName: fileName.Trim(),
++                    Title: title.Trim(),
++                    Enabled: enabled,
++                    LoadPriority: loadPriority,
++                    SourceIndex: index));
++            }
++
++            index++;
++        }
++
++        return new DfuModsJsonLoadOrder(Path.GetFullPath(path), entries);
++    }
++    catch (Exception ex)
++    {
++        Console.WriteLine($"WARN: Could not read DFU Mods.json: {path}");
++        Console.WriteLine($"      {ex.GetType().Name}: {ex.Message}");
++        return null;
++    }
++}
++
++static Mo2ModlistLoadOrder? LoadMo2ModlistLoadOrder(string? path)
++{
++    if (string.IsNullOrWhiteSpace(path))
++        return null;
++
++    if (!File.Exists(path))
++    {
++        Console.WriteLine($"WARN: MO2 modlist.txt file does not exist: {path}");
++        return null;
++    }
++
++    try
++    {
++        var entries = new List<Mo2ModEntry>();
++        int lineNumber = 0;
++        int orderIndex = 0;
++
++        foreach (string rawLine in File.ReadLines(path))
++        {
++            lineNumber++;
++            string line = rawLine.Trim();
++
++            if (line.Length == 0 || line.StartsWith("#", StringComparison.OrdinalIgnoreCase))
++                continue;
++
++            char marker = line[0];
++            if (marker != '+' && marker != '-')
++                continue;
++
++            string modName = line[1..].Trim();
++            if (modName.Length == 0)
++                continue;
++
++            bool isSeparator = modName.EndsWith("_separator", StringComparison.OrdinalIgnoreCase);
++
++            entries.Add(new Mo2ModEntry(
++                ModName: modName,
++                Enabled: marker == '+',
++                OrderIndex: orderIndex,
++                LineNumber: lineNumber,
++                IsSeparator: isSeparator));
++
++            orderIndex++;
++        }
++
++        return new Mo2ModlistLoadOrder(Path.GetFullPath(path), entries);
++    }
++    catch (Exception ex)
++    {
++        Console.WriteLine($"WARN: Could not read MO2 modlist.txt: {path}");
++        Console.WriteLine($"      {ex.GetType().Name}: {ex.Message}");
++        return null;
++    }
++}
++
++static string? GetJsonString(JsonElement element, string propertyName)
++{
++    return element.TryGetProperty(propertyName, out JsonElement property) &&
++           property.ValueKind == JsonValueKind.String
++        ? property.GetString()
++        : null;
++}
++
++static bool? GetJsonBool(JsonElement element, string propertyName)
++{
++    return element.TryGetProperty(propertyName, out JsonElement property) &&
++           (property.ValueKind == JsonValueKind.True || property.ValueKind == JsonValueKind.False)
++        ? property.GetBoolean()
++        : null;
++}
++
++static int? GetJsonInt(JsonElement element, string propertyName)
++{
++    return element.TryGetProperty(propertyName, out JsonElement property) &&
++           property.ValueKind == JsonValueKind.Number &&
++           property.TryGetInt32(out int value)
++        ? value
++        : null;
++}
++
++static List<AssetInventoryRecord> ApplyInventoryLoadOrder(
++    List<AssetInventoryRecord> records,
++    DfuModsJsonLoadOrder? dfuLoadOrder,
++    Mo2ModlistLoadOrder? mo2LoadOrder)
++{
++    if (dfuLoadOrder == null && mo2LoadOrder == null)
++        return records;
++
++    return records
++        .Select(record =>
++        {
++            DfuModEntry? dfuEntry = dfuLoadOrder?.FindForDfmod(record.DfmodPath, record.ModName);
++            Mo2ModEntry? mo2Entry = mo2LoadOrder?.FindForModFolder(record.ModName);
++
++            return record with
++            {
++                DfuFileName = dfuEntry?.FileName,
++                DfuTitle = dfuEntry?.Title,
++                DfuEnabled = dfuEntry?.Enabled,
++                DfuLoadPriority = dfuEntry?.LoadPriority,
++                Mo2ModName = mo2Entry?.ModName,
++                Mo2Enabled = mo2Entry?.Enabled,
++                Mo2ListIndex = mo2Entry?.OrderIndex
++            };
++        })
++        .ToList();
++}
++
++static IEnumerable<AssetInventoryRecord> OrderInventoryRecordsForDisplay(IEnumerable<AssetInventoryRecord> records)
++{
++    return records
++        .OrderBy(r => r.DfuLoadPriority.HasValue ? 0 : 1)
++        .ThenBy(r => r.DfuLoadPriority ?? int.MaxValue)
++        .ThenBy(r => r.Mo2ListIndex.HasValue ? 0 : 1)
++        .ThenBy(r => r.Mo2ListIndex ?? int.MaxValue)
++        .ThenBy(r => r.ModName, StringComparer.OrdinalIgnoreCase)
++        .ThenBy(r => r.DfmodPath, StringComparer.OrdinalIgnoreCase)
++        .ThenBy(r => r.AssetName, StringComparer.OrdinalIgnoreCase)
++        .ThenBy(r => r.PathId);
++}
++
++static AssetInventoryRecord? GetWinningDfuRecord(IEnumerable<AssetInventoryRecord> records)
++{
++    return records
++        .Where(r => r.DfuEnabled == true && r.DfuLoadPriority.HasValue)
++        .OrderByDescending(r => r.DfuLoadPriority.GetValueOrDefault())
++        .ThenBy(r => r.DfmodPath, StringComparer.OrdinalIgnoreCase)
++        .ThenBy(r => r.AssetName, StringComparer.OrdinalIgnoreCase)
++        .ThenBy(r => r.PathId)
++        .FirstOrDefault();
++}
++
++static bool IsWinningDfuRecord(AssetInventoryRecord record, IEnumerable<AssetInventoryRecord> groupRecords)
++{
++    AssetInventoryRecord? winner = GetWinningDfuRecord(groupRecords);
++    return winner != null && winner.Equals(record);
++}
++
++static string FormatDfuWinner(IEnumerable<AssetInventoryRecord> records)
++{
++    List<AssetInventoryRecord> list = records.ToList();
++    AssetInventoryRecord? winner = GetWinningDfuRecord(list);
++
++    if (winner != null)
++        return $"DFU {winner.DfuLoadPriority}: {winner.DfuTitle ?? winner.DfuFileName ?? winner.ModName}";
++
++    if (list.Any(r => r.DfuLoadPriority.HasValue))
++        return "no enabled DFU provider";
++
++    return "unknown";
++}
++
+ static bool IsReportableInventoryDuplicate(AssetInventoryRecord record)
+ {
+     return record.DuplicatePolicy.StartsWith("Report:", StringComparison.OrdinalIgnoreCase);
+@@ -1046,6 +1330,8 @@ static void PrintUsage()
+     Console.WriteLine("  DaggerfallEdit.Cli --loose <folder>");
+     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder>");
+     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --inventory --out <inventory-report.txt>");
++    Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --inventory --dfu-mods-json <Mods.json> --out <inventory-report.txt>");
++    Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --inventory --dfu-mods-json <Mods.json> --mo2-modlist <modlist.txt> --inventory-active-only");
+     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --inventory --inventory-details --inventory-max-groups 25 --inventory-max-records 5");
+     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --inventory --inventory-kind ExistingLocationOverride");
+     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --inventory --inventory-kind ItemTemplates --inventory-details");
+@@ -1073,7 +1359,8 @@ public sealed record InventoryReportOptions(
+     int MaxRecordsPerDuplicateGroup,
+     string? SemanticKindFilter,
+     string? ClassNameFilter,
+-    string? IdentityContainsFilter
++    string? IdentityContainsFilter,
++    bool ActiveOnly
+ );
+ 
+ public sealed record InventoryDuplicateGroup(
+@@ -1098,4 +1385,118 @@ public sealed record ConflictClassification(
+     string Severity,
+     string Title,
+     string Explanation
+-);
+\ No newline at end of file
++);
++public sealed record DfuModEntry(
++    string FileName,
++    string Title,
++    bool Enabled,
++    int LoadPriority,
++    int SourceIndex
++);
++
++public sealed class DfuModsJsonLoadOrder
++{
++    private readonly Dictionary<string, DfuModEntry> byFileName;
++    private readonly Dictionary<string, DfuModEntry> byTitle;
++
++    public DfuModsJsonLoadOrder(string path, List<DfuModEntry> entries)
++    {
++        Path = path;
++        Entries = entries;
++        byFileName = BuildLookup(entries, e => e.FileName);
++        byTitle = BuildLookup(entries, e => e.Title);
++    }
++
++    public string Path { get; }
++
++    public List<DfuModEntry> Entries { get; }
++
++    public DfuModEntry? FindForDfmod(string dfmodPath, string modName)
++    {
++        string stem = System.IO.Path.GetFileNameWithoutExtension(dfmodPath);
++
++        return TryFind(stem) ?? TryFind(modName);
++    }
++
++    private DfuModEntry? TryFind(string value)
++    {
++        string key = LoadOrderKey.Normalize(value);
++
++        if (byFileName.TryGetValue(key, out DfuModEntry? byFile))
++            return byFile;
++
++        if (byTitle.TryGetValue(key, out DfuModEntry? byTitleEntry))
++            return byTitleEntry;
++
++        return null;
++    }
++
++    private static Dictionary<string, DfuModEntry> BuildLookup(
++        IEnumerable<DfuModEntry> entries,
++        Func<DfuModEntry, string> keySelector)
++    {
++        var result = new Dictionary<string, DfuModEntry>(StringComparer.OrdinalIgnoreCase);
++
++        foreach (DfuModEntry entry in entries)
++        {
++            string key = LoadOrderKey.Normalize(keySelector(entry));
++
++            if (key.Length == 0)
++                continue;
++
++            result.TryAdd(key, entry);
++        }
++
++        return result;
++    }
++}
++
++public sealed record Mo2ModEntry(
++    string ModName,
++    bool Enabled,
++    int OrderIndex,
++    int LineNumber,
++    bool IsSeparator
++);
++
++public sealed class Mo2ModlistLoadOrder
++{
++    private readonly Dictionary<string, Mo2ModEntry> byModName;
++
++    public Mo2ModlistLoadOrder(string path, List<Mo2ModEntry> entries)
++    {
++        Path = path;
++        Entries = entries;
++        byModName = entries
++            .Where(e => !e.IsSeparator)
++            .GroupBy(e => LoadOrderKey.Normalize(e.ModName), StringComparer.OrdinalIgnoreCase)
++            .Where(g => g.Key.Length > 0)
++            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
++    }
++
++    public string Path { get; }
++
++    public List<Mo2ModEntry> Entries { get; }
++
++    public Mo2ModEntry? FindForModFolder(string modName)
++    {
++        string key = LoadOrderKey.Normalize(modName);
++        return byModName.TryGetValue(key, out Mo2ModEntry? entry)
++            ? entry
++            : null;
++    }
++}
++
++public static class LoadOrderKey
++{
++    public static string Normalize(string? value)
++    {
++        if (string.IsNullOrWhiteSpace(value))
++            return string.Empty;
++
++        return value
++            .Trim()
++            .Replace('\\', '/')
++            .ToLowerInvariant();
++    }
++}
+diff --git a/src/DaggerfallEdit.Core/AssetInventoryRecord.cs b/src/DaggerfallEdit.Core/AssetInventoryRecord.cs
+index e0ae749..c810880 100644
+--- a/src/DaggerfallEdit.Core/AssetInventoryRecord.cs
++++ b/src/DaggerfallEdit.Core/AssetInventoryRecord.cs
+@@ -11,5 +11,12 @@ public sealed record AssetInventoryRecord(
+     long? ByteLength,
+     string? ContainerPath,
+     bool HasStableName,
+-    string DuplicatePolicy
++    string DuplicatePolicy,
++    string? DfuFileName,
++    string? DfuTitle,
++    bool? DfuEnabled,
++    int? DfuLoadPriority,
++    string? Mo2ModName,
++    bool? Mo2Enabled,
++    int? Mo2ListIndex
+ );

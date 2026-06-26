@@ -1,0 +1,138 @@
+diff --git a/src/DaggerfallEdit.AssetStudio/AssetStudioAssetInventoryExtractor.cs b/src/DaggerfallEdit.AssetStudio/AssetStudioAssetInventoryExtractor.cs
+index 4c74688..9ed598b 100644
+--- a/src/DaggerfallEdit.AssetStudio/AssetStudioAssetInventoryExtractor.cs
++++ b/src/DaggerfallEdit.AssetStudio/AssetStudioAssetInventoryExtractor.cs
+@@ -72,14 +72,28 @@ public static class AssetStudioAssetInventoryExtractor
+             if (LooksLikeExistingLocationAsset(assetName))
+                 return "ExistingLocationOverride";
+ 
+-            if (assetName.Contains("quest", StringComparison.OrdinalIgnoreCase))
++            if (assetName.Equals("ItemTemplates", StringComparison.OrdinalIgnoreCase))
++                return "ItemTemplates";
++
++            if (LooksLikeClassicRmbBlockAsset(assetName))
++                return "BlockLayoutRMB";
++
++            if (LooksLikeClassicRdbBlockAsset(assetName))
++                return "DungeonBlockRDB";
++
++            if (LooksLikeTextureFrameMetadata(assetName))
++                return "TextureFrameMetadata";
++
++            if (LooksLikeQuestAsset(assetName))
+                 return "QuestOrQuestText";
+ 
+-            if (assetName.Contains("local", StringComparison.OrdinalIgnoreCase) ||
+-                assetName.Contains("lang", StringComparison.OrdinalIgnoreCase))
++            if (LooksLikeBookOrTextResource(assetName))
++                return "BookOrTextResource";
++
++            if (LooksLikeLocalizationAsset(assetName))
+                 return "LocalizationOrText";
+ 
+-            return "TextAsset";
++            return "UnknownTextAsset";
+         }
+ 
+         return className switch
+@@ -157,6 +171,48 @@ public static class AssetStudioAssetInventoryExtractor
+                int.TryParse(parts[2], out _);
+     }
+ 
++    private static bool LooksLikeClassicRmbBlockAsset(string assetName)
++    {
++        return assetName.EndsWith(".RMB", StringComparison.OrdinalIgnoreCase);
++    }
++
++    private static bool LooksLikeClassicRdbBlockAsset(string assetName)
++    {
++        return assetName.EndsWith(".RDB", StringComparison.OrdinalIgnoreCase);
++    }
++
++    private static bool LooksLikeTextureFrameMetadata(string assetName)
++    {
++        string[] parts = assetName.Split('_', '-', StringSplitOptions.RemoveEmptyEntries);
++
++        return parts.Length == 3 &&
++               int.TryParse(parts[0], out _) &&
++               int.TryParse(parts[1], out _) &&
++               int.TryParse(parts[2], out _);
++    }
++
++    private static bool LooksLikeQuestAsset(string assetName)
++    {
++        return assetName.Contains("quest", StringComparison.OrdinalIgnoreCase) ||
++               assetName.StartsWith("QRC", StringComparison.OrdinalIgnoreCase) ||
++               assetName.StartsWith("QBN", StringComparison.OrdinalIgnoreCase);
++    }
++
++    private static bool LooksLikeBookOrTextResource(string assetName)
++    {
++        return assetName.Contains("book", StringComparison.OrdinalIgnoreCase) ||
++               assetName.Contains("biog", StringComparison.OrdinalIgnoreCase) ||
++               assetName.EndsWith(".TXT", StringComparison.OrdinalIgnoreCase) ||
++               assetName.EndsWith(".RSC", StringComparison.OrdinalIgnoreCase);
++    }
++
++    private static bool LooksLikeLocalizationAsset(string assetName)
++    {
++        return assetName.Contains("local", StringComparison.OrdinalIgnoreCase) ||
++               assetName.Contains("lang", StringComparison.OrdinalIgnoreCase) ||
++               assetName.Contains("translation", StringComparison.OrdinalIgnoreCase);
++    }
++
+     private static string BuildIdentityKey(
+         string className,
+         string assetName,
+diff --git a/src/DaggerfallEdit.Cli/Program.cs b/src/DaggerfallEdit.Cli/Program.cs
+index 85728d8..e688673 100644
+--- a/src/DaggerfallEdit.Cli/Program.cs
++++ b/src/DaggerfallEdit.Cli/Program.cs
+@@ -485,6 +485,7 @@ static void PrintAssetInventory(List<AssetInventoryRecord> records, InventoryRep
+             IsReportable: g.Any(r => IsReportableInventoryDuplicate(r))))
+         .Where(g => g.SourceCount > 1)
+         .OrderByDescending(g => g.IsReportable)
++        .ThenBy(g => InventorySemanticSortRank(g.Records.First().SemanticKind))
+         .ThenByDescending(g => g.ModCount)
+         .ThenByDescending(g => g.SourceCount)
+         .ThenBy(g => g.IdentityKey)
+@@ -632,6 +633,30 @@ static bool IsReportableInventoryDuplicate(AssetInventoryRecord record)
+     return record.DuplicatePolicy.StartsWith("Report:", StringComparison.OrdinalIgnoreCase);
+ }
+ 
++static int InventorySemanticSortRank(string semanticKind)
++{
++    return semanticKind switch
++    {
++        "NewLocation" => 0,
++        "ExistingLocationOverride" => 1,
++        "ItemTemplates" => 2,
++        "BlockLayoutRMB" => 3,
++        "DungeonBlockRDB" => 4,
++        "QuestOrQuestText" => 5,
++        "LocalizationOrText" => 6,
++        "BookOrTextResource" => 7,
++        "UnknownTextAsset" => 8,
++        "TextureFrameMetadata" => 9,
++        "TextureReplacement" => 20,
++        "SpriteReplacement" => 21,
++        "MaterialReplacement" => 22,
++        "MeshReplacement" => 23,
++        "AudioReplacement" => 24,
++        "PrefabOrGameObject" => 25,
++        _ => 50
++    };
++}
++
+ static void PrintConflicts(
+     List<MapIdRecord> records,
+     bool showSingleAssetGroups,
+@@ -1023,6 +1048,8 @@ static void PrintUsage()
+     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --inventory --out <inventory-report.txt>");
+     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --inventory --inventory-details --inventory-max-groups 25 --inventory-max-records 5");
+     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --inventory --inventory-kind ExistingLocationOverride");
++    Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --inventory --inventory-kind ItemTemplates --inventory-details");
++    Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --inventory --inventory-kind BlockLayoutRMB --inventory-max-groups 100");
+     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --inventory --inventory-class Texture2D --inventory-details");
+     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --inventory --inventory-identity-contains location-11-197");
+     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --inventory --inventory-all-duplicates");

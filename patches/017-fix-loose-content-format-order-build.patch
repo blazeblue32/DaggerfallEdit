@@ -1,0 +1,21 @@
+diff --git a/src/DaggerfallEdit.Cli/Program.cs b/src/DaggerfallEdit.Cli/Program.cs
+--- a/src/DaggerfallEdit.Cli/Program.cs
++++ b/src/DaggerfallEdit.Cli/Program.cs
+@@ -1122,7 +1122,7 @@ static void PrintLooseContentInventory(
+         foreach (LooseContentRecord record in orderedRecords.Take(options.MaxRecordsPerDuplicateGroup))
+         {
+             Console.WriteLine($"  {index}. Source: {record.SourceName}");
+-            Console.WriteLine($"     MO2 Order: {FormatMo2LooseOrder(record)}");
++            Console.WriteLine($"     MO2 Order: {FormatMo2LooseContentOrder(record)}");
+             Console.WriteLine($"     Relative Path: {record.RelativePath}");
+             Console.WriteLine($"     File: {record.FilePath}");
+             Console.WriteLine($"     Content Kind: {record.ContentKind}");
+@@ -1239,7 +1239,7 @@ static string FormatLooseContentWinner(IEnumerable<LooseContentRecord> records)
+         : $"MO2 {winner.Mo2ListIndex}: {winner.Mo2ModName ?? winner.SourceName}";
+ }
+ 
+-static string FormatMo2LooseOrder(LooseContentRecord record)
++static string FormatMo2LooseContentOrder(LooseContentRecord record)
+ {
+     if (record.IsOverwrite)
+         return "Overwrite (highest priority)";

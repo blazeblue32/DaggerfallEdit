@@ -1,0 +1,30 @@
+diff --git a/src/DaggerfallEdit.Cli/Program.cs b/src/DaggerfallEdit.Cli/Program.cs
+index 2b9489c..90731a3 100644
+--- a/src/DaggerfallEdit.Cli/Program.cs
++++ b/src/DaggerfallEdit.Cli/Program.cs
+@@ -908,6 +908,25 @@ static string NormalizeLooseJsonForLenientParsing(string text)
+             continue;
+         }
+ 
++        if (c == '}')
++        {
++            builder.Append(c);
++
++            // Some loose JSON-like data files contain adjacent objects inside an
++            // array without the required comma between them:
++            //     }
++            //     {
++            // Normalize only this structural case while preserving whitespace.
++            int next = i + 1;
++            while (next < text.Length && char.IsWhiteSpace(text[next]))
++                next++;
++
++            if (next < text.Length && text[next] == '{')
++                builder.Append(',');
++
++            continue;
++        }
++
+         if (c == '-' && i + 2 < text.Length && text[i + 1] == '0' && char.IsDigit(text[i + 2]) && IsLooseJsonNumberTokenStart(text, i))
+         {
+             int digitStart = i + 1;

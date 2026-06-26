@@ -1,0 +1,630 @@
+diff --git a/src/DaggerfallEdit.Cli/Program.cs b/src/DaggerfallEdit.Cli/Program.cs
+index ca7b6fe..5055927 100644
+--- a/src/DaggerfallEdit.Cli/Program.cs
++++ b/src/DaggerfallEdit.Cli/Program.cs
+@@ -39,11 +39,14 @@ string? dfuModsJsonPath = null;
+ string? mo2ModlistPath = null;
+ bool inventoryActiveOnly = false;
+ bool looseInventory = false;
++bool looseContent = false;
+ bool looseIncludeDisabled = false;
+ string? overwritePath = null;
+ string? looseKindFilter = null;
+ string? looseExtensionFilter = null;
+ string? loosePathContainsFilter = null;
++string? looseContentKindFilter = null;
++string? looseContentIdentityContainsFilter = null;
+ 
+ for (int i = 2; i < args.Length; i++)
+ {
+@@ -153,6 +156,10 @@ for (int i = 2; i < args.Length; i++)
+     {
+         looseInventory = true;
+     }
++    else if (args[i] == "--loose-content")
++    {
++        looseContent = true;
++    }
+     else if (args[i] == "--loose-include-disabled")
+     {
+         looseIncludeDisabled = true;
+@@ -177,6 +184,16 @@ for (int i = 2; i < args.Length; i++)
+         loosePathContainsFilter = args[i + 1];
+         i++;
+     }
++    else if (args[i] == "--loose-content-kind" && i + 1 < args.Length)
++    {
++        looseContentKindFilter = args[i + 1];
++        i++;
++    }
++    else if (args[i] == "--loose-content-identity-contains" && i + 1 < args.Length)
++    {
++        looseContentIdentityContainsFilter = args[i + 1];
++        i++;
++    }
+ }
+ 
+ TextWriter originalOut = Console.Out;
+@@ -198,7 +215,7 @@ if (!string.IsNullOrWhiteSpace(outPath))
+ string cachePath = Path.Combine(cacheDir, "mapid-cache.json");
+ ScanCache? cache = noCache ? null : ScanCache.Load(cachePath);
+ 
+-if (looseInventory)
++if (looseInventory || looseContent)
+ {
+     if (mode != "--mods")
+     {
+@@ -219,6 +236,28 @@ if (looseInventory)
+     string? resolvedOverwritePath = ResolveOverwritePath(root, overwritePath);
+     List<LooseFileInventoryRecord> looseRecords = ScanLooseFileInventory(root, mo2LoadOrder, resolvedOverwritePath);
+ 
++    if (looseContent)
++    {
++        List<LooseContentRecord> looseContentRecords = ScanLooseContentInventory(looseRecords);
++
++        Console.WriteLine();
++        PrintLooseContentInventory(
++            looseContentRecords,
++            new LooseContentReportOptions(
++                IncludeDisabled: looseIncludeDisabled,
++                PrintDuplicateDetails: inventoryDetails,
++                MaxDuplicateGroups: inventoryMaxGroups,
++                MaxRecordsPerDuplicateGroup: inventoryMaxRecordsPerGroup,
++                ContentKindFilter: looseContentKindFilter,
++                IdentityContainsFilter: looseContentIdentityContainsFilter,
++                PathContainsFilter: loosePathContainsFilter),
++            mo2LoadOrder,
++            resolvedOverwritePath);
++
++        FinishOutput(outWriter, originalOut, outPath);
++        return 0;
++    }
++
+     Console.WriteLine();
+     PrintLooseFileInventory(
+         looseRecords,
+@@ -726,6 +765,510 @@ static string NormalizeIdentityPart(string value)
+     return value.Trim().Replace('\\', '/').ToLowerInvariant();
+ }
+ 
++
++static List<LooseContentRecord> ScanLooseContentInventory(List<LooseFileInventoryRecord> looseFileRecords)
++{
++    Console.WriteLine("Loose content scanning known structured loose files.");
++    Console.WriteLine("This scans content inside physical loose files, so overridden loser records remain visible for xEdit-style stacks.");
++
++    var contentRecords = new List<LooseContentRecord>();
++    var jsonFiles = looseFileRecords
++        .Where(r => r.Extension.Equals(".json", StringComparison.OrdinalIgnoreCase))
++        .OrderBy(r => GetLooseWinnerSortValue(r))
++        .ThenBy(r => r.RelativePath, StringComparer.OrdinalIgnoreCase)
++        .ThenBy(r => r.FilePath, StringComparer.OrdinalIgnoreCase)
++        .ToList();
++
++    int filesParsed = 0;
++    int filesWithRecords = 0;
++    int filesFailed = 0;
++
++    foreach (LooseFileInventoryRecord fileRecord in jsonFiles)
++    {
++        try
++        {
++            List<LooseContentRecord> fileContentRecords = ExtractLooseJsonContentRecords(fileRecord).ToList();
++            filesParsed++;
++
++            if (fileContentRecords.Count > 0)
++                filesWithRecords++;
++
++            contentRecords.AddRange(fileContentRecords);
++        }
++        catch (Exception ex)
++        {
++            filesFailed++;
++            Console.WriteLine($"WARN: Could not parse loose JSON content: {fileRecord.FilePath}");
++            Console.WriteLine($"      {ex.GetType().Name}: {ex.Message}");
++        }
++    }
++
++    Console.WriteLine($"Loose JSON files considered: {jsonFiles.Count}");
++    Console.WriteLine($"Loose JSON files parsed: {filesParsed}");
++    Console.WriteLine($"Loose JSON files with recognised content records: {filesWithRecords}");
++    Console.WriteLine($"Loose JSON files with parse errors: {filesFailed}");
++    Console.WriteLine($"Loose content records found: {contentRecords.Count}");
++
++    return contentRecords;
++}
++
++static IEnumerable<LooseContentRecord> ExtractLooseJsonContentRecords(LooseFileInventoryRecord fileRecord)
++{
++    string text = File.ReadAllText(fileRecord.FilePath);
++
++    using JsonDocument document = JsonDocument.Parse(text, new JsonDocumentOptions
++    {
++        AllowTrailingCommas = true,
++        CommentHandling = JsonCommentHandling.Skip
++    });
++
++    foreach ((JsonElement element, string jsonPath) in EnumerateJsonObjects(document.RootElement, "$"))
++    {
++        if (TryBuildLooseJsonContentIdentity(
++                fileRecord,
++                element,
++                jsonPath,
++                out string contentKind,
++                out string contentIdentityKey,
++                out string displayName))
++        {
++            yield return new LooseContentRecord(
++                SourceName: fileRecord.ModName,
++                SourceFolderPath: fileRecord.ModFolderPath,
++                FilePath: fileRecord.FilePath,
++                RelativePath: fileRecord.RelativePath,
++                SourceFileKind: fileRecord.FileKind,
++                SourceExtension: fileRecord.Extension,
++                ContentKind: contentKind,
++                ContentIdentityKey: contentIdentityKey,
++                JsonPath: jsonPath,
++                DisplayName: displayName,
++                SourceByteLength: fileRecord.ByteLength,
++                DuplicatePolicy: "Report: loose content record override",
++                IsOverwrite: fileRecord.IsOverwrite,
++                Mo2ModName: fileRecord.Mo2ModName,
++                Mo2Enabled: fileRecord.Mo2Enabled,
++                Mo2ListIndex: fileRecord.Mo2ListIndex,
++                Mo2LineNumber: fileRecord.Mo2LineNumber);
++        }
++    }
++}
++
++static IEnumerable<(JsonElement Element, string JsonPath)> EnumerateJsonObjects(JsonElement element, string jsonPath, int depth = 0)
++{
++    if (depth > 64)
++        yield break;
++
++    if (element.ValueKind == JsonValueKind.Object)
++    {
++        yield return (element, jsonPath);
++
++        foreach (JsonProperty property in element.EnumerateObject())
++        {
++            foreach ((JsonElement child, string childPath) in EnumerateJsonObjects(property.Value, $"{jsonPath}.{property.Name}", depth + 1))
++                yield return (child, childPath);
++        }
++    }
++    else if (element.ValueKind == JsonValueKind.Array)
++    {
++        int index = 0;
++        foreach (JsonElement child in element.EnumerateArray())
++        {
++            foreach ((JsonElement nestedChild, string childPath) in EnumerateJsonObjects(child, $"{jsonPath}[{index}]", depth + 1))
++                yield return (nestedChild, childPath);
++
++            index++;
++        }
++    }
++}
++
++static bool TryBuildLooseJsonContentIdentity(
++    LooseFileInventoryRecord fileRecord,
++    JsonElement element,
++    string jsonPath,
++    out string contentKind,
++    out string contentIdentityKey,
++    out string displayName)
++{
++    contentKind = string.Empty;
++    contentIdentityKey = string.Empty;
++    displayName = string.Empty;
++
++    if (element.ValueKind != JsonValueKind.Object)
++        return false;
++
++    if (IsFlatReplacementPath(fileRecord.RelativePath))
++    {
++        int? archive = GetJsonIntAny(element,
++            "Archive", "archive", "TextureArchive", "textureArchive", "FlatArchive", "flatArchive", "ArchiveIndex", "archiveIndex", "archiveID", "ArchiveID");
++        int? record = GetJsonIntAny(element,
++            "Record", "record", "TextureRecord", "textureRecord", "FlatRecord", "flatRecord", "RecordIndex", "recordIndex", "index", "Index", "recordID", "RecordID");
++        int? frame = GetJsonIntAny(element,
++            "Frame", "frame", "TextureFrame", "textureFrame", "FlatFrame", "flatFrame", "FrameIndex", "frameIndex");
++
++        if (archive.HasValue && record.HasValue)
++        {
++            string framePart = frame.HasValue ? $"-{frame.Value}" : "";
++            contentKind = "FlatReplacementRecord";
++            contentIdentityKey = $"loosecontent/flatreplacement/{archive.Value}_{record.Value}{framePart}";
++            displayName = $"{archive.Value}_{record.Value}{framePart}";
++            return true;
++        }
++    }
++
++    string? id = GetJsonScalarStringAny(element, "id", "Id", "ID", "key", "Key", "name", "Name", "FileName", "fileName", "Title", "title");
++    if (!string.IsNullOrWhiteSpace(id))
++    {
++        contentKind = IsFlatReplacementPath(fileRecord.RelativePath) ? "FlatReplacementJsonRecord" : "JsonRecord";
++        string domain = BuildLooseJsonContentDomain(fileRecord.RelativePath);
++        contentIdentityKey = $"loosecontent/{NormalizeIdentityPart(contentKind)}/{domain}/{NormalizeIdentityPart(id)}";
++        displayName = id.Trim();
++        return true;
++    }
++
++    return false;
++}
++
++static bool IsFlatReplacementPath(string relativePath)
++{
++    return relativePath.Contains("FlatReplacements/", StringComparison.OrdinalIgnoreCase) ||
++           relativePath.Contains("FlatReplacement/", StringComparison.OrdinalIgnoreCase) ||
++           relativePath.Contains("flatreplacement", StringComparison.OrdinalIgnoreCase);
++}
++
++static string BuildLooseJsonContentDomain(string relativePath)
++{
++    string normalized = NormalizeRelativePath(relativePath);
++    string? directory = Path.GetDirectoryName(normalized)?.Replace('\\', '/');
++
++    if (!string.IsNullOrWhiteSpace(directory))
++        return NormalizeIdentityPart(directory);
++
++    string fileName = Path.GetFileNameWithoutExtension(normalized);
++    return NormalizeIdentityPart(fileName.Length > 0 ? fileName : normalized);
++}
++
++static int? GetJsonIntAny(JsonElement element, params string[] propertyNames)
++{
++    foreach (string propertyName in propertyNames)
++    {
++        if (!element.TryGetProperty(propertyName, out JsonElement property))
++            continue;
++
++        if (property.ValueKind == JsonValueKind.Number && property.TryGetInt32(out int intValue))
++            return intValue;
++
++        if (property.ValueKind == JsonValueKind.String &&
++            int.TryParse(property.GetString(), out int parsedValue))
++        {
++            return parsedValue;
++        }
++    }
++
++    return null;
++}
++
++static string? GetJsonScalarStringAny(JsonElement element, params string[] propertyNames)
++{
++    foreach (string propertyName in propertyNames)
++    {
++        if (!element.TryGetProperty(propertyName, out JsonElement property))
++            continue;
++
++        if (property.ValueKind == JsonValueKind.String)
++            return property.GetString();
++
++        if (property.ValueKind == JsonValueKind.Number)
++            return property.GetRawText();
++
++        if (property.ValueKind == JsonValueKind.True || property.ValueKind == JsonValueKind.False)
++            return property.GetBoolean().ToString();
++    }
++
++    return null;
++}
++
++static void PrintLooseContentInventory(
++    List<LooseContentRecord> records,
++    LooseContentReportOptions options,
++    Mo2ModlistLoadOrder mo2LoadOrder,
++    string? overwritePath)
++{
++    List<LooseContentRecord> reportRecords = ApplyLooseContentFilters(records, options);
++
++    Console.WriteLine("Loose content record inventory");
++    Console.WriteLine(new string('=', 80));
++    Console.WriteLine($"Loose content records found: {records.Count}");
++
++    if (reportRecords.Count != records.Count)
++        Console.WriteLine($"Loose content records matching filters: {reportRecords.Count}");
++
++    Console.WriteLine($"Loose source folders with content records: {reportRecords.Select(r => r.SourceFolderPath).Distinct(StringComparer.OrdinalIgnoreCase).Count()}");
++    Console.WriteLine($"Enabled loose source folders with content records: {reportRecords.Where(r => r.Mo2Enabled == true).Select(r => r.SourceFolderPath).Distinct(StringComparer.OrdinalIgnoreCase).Count()}");
++
++    if (!options.IncludeDisabled)
++        Console.WriteLine("Filter: enabled MO2 mods only for loose content analysis");
++
++    if (!string.IsNullOrWhiteSpace(options.ContentKindFilter))
++        Console.WriteLine($"Filter: Loose content kind = {options.ContentKindFilter}");
++
++    if (!string.IsNullOrWhiteSpace(options.IdentityContainsFilter))
++        Console.WriteLine($"Filter: Content identity contains = {options.IdentityContainsFilter}");
++
++    if (!string.IsNullOrWhiteSpace(options.PathContainsFilter))
++        Console.WriteLine($"Filter: Relative path contains = {options.PathContainsFilter}");
++
++    Console.WriteLine();
++    Console.WriteLine("MO2 loose-content order:");
++    Console.WriteLine($"  File: {mo2LoadOrder.Path}");
++    Console.WriteLine($"  Entries: {mo2LoadOrder.Entries.Count}");
++    Console.WriteLine($"  Enabled entries: {mo2LoadOrder.Entries.Count(e => e.Enabled)}");
++    Console.WriteLine($"  Disabled entries: {mo2LoadOrder.Entries.Count(e => !e.Enabled)}");
++    Console.WriteLine("  Winner rule used here: same as loose files; earlier enabled modlist.txt entries override later entries, and Overwrite is highest priority.");
++    Console.WriteLine("  Note: This pass reports recognised internal records inside structured loose files, not whole-file path overrides.");
++
++    if (!string.IsNullOrWhiteSpace(overwritePath))
++        Console.WriteLine($"  Overwrite folder: {overwritePath}");
++
++    Console.WriteLine();
++    Console.WriteLine("Loose content kind counts:");
++    foreach (var group in reportRecords
++                 .GroupBy(r => r.ContentKind, StringComparer.OrdinalIgnoreCase)
++                 .OrderByDescending(g => g.Count())
++                 .ThenBy(g => g.Key))
++    {
++        Console.WriteLine($"  {group.Key}: {group.Count()}");
++    }
++
++    Console.WriteLine();
++    Console.WriteLine("Loose content source file kind counts:");
++    foreach (var group in reportRecords
++                 .GroupBy(r => r.SourceFileKind, StringComparer.OrdinalIgnoreCase)
++                 .OrderByDescending(g => g.Count())
++                 .ThenBy(g => g.Key))
++    {
++        Console.WriteLine($"  {group.Key}: {group.Count()}");
++    }
++
++    Console.WriteLine();
++    Console.WriteLine("Duplicate policy counts:");
++    foreach (var group in reportRecords
++                 .GroupBy(r => r.DuplicatePolicy, StringComparer.OrdinalIgnoreCase)
++                 .OrderByDescending(g => g.Count())
++                 .ThenBy(g => g.Key))
++    {
++        Console.WriteLine($"  {group.Key}: {group.Count()}");
++    }
++
++    Console.WriteLine();
++    Console.WriteLine("Loose content record overrides:");
++
++    var duplicateGroups = reportRecords
++        .GroupBy(r => r.ContentIdentityKey, StringComparer.OrdinalIgnoreCase)
++        .Select(g => new LooseContentDuplicateGroup(
++            IdentityKey: g.Key,
++            Records: g.ToList(),
++            SourceCount: g.Select(r => r.FilePath).Distinct(StringComparer.OrdinalIgnoreCase).Count(),
++            ModCount: g.Select(r => r.SourceName).Distinct(StringComparer.OrdinalIgnoreCase).Count(),
++            IsReportable: g.Any(r => IsReportableLooseContentDuplicate(r))))
++        .Where(g => g.SourceCount > 1)
++        .OrderByDescending(g => g.IsReportable)
++        .ThenBy(g => LooseContentKindSortRank(g.Records.First().ContentKind))
++        .ThenByDescending(g => g.ModCount)
++        .ThenByDescending(g => g.SourceCount)
++        .ThenBy(g => g.IdentityKey)
++        .ToList();
++
++    if (duplicateGroups.Count == 0)
++    {
++        Console.WriteLine("  None found.");
++        return;
++    }
++
++    Console.WriteLine($"  Reportable loose content override group(s): {duplicateGroups.Count(g => g.IsReportable)}");
++    Console.WriteLine($"  Groups selected for output: {duplicateGroups.Count}");
++    Console.WriteLine();
++
++    PrintLooseContentDuplicateOverview(duplicateGroups, options.MaxDuplicateGroups);
++
++    if (!options.PrintDuplicateDetails)
++    {
++        Console.WriteLine();
++        Console.WriteLine("Loose content duplicate details are suppressed by default to keep reports readable.");
++        Console.WriteLine("Use --inventory-details to print grouped loose-content provider stacks.");
++        Console.WriteLine("Use --loose-content-kind, --loose-content-identity-contains, or --loose-path-contains to focus the report first.");
++        return;
++    }
++
++    Console.WriteLine();
++    Console.WriteLine($"Loose content duplicate detail groups shown: {Math.Min(options.MaxDuplicateGroups, duplicateGroups.Count)} of {duplicateGroups.Count}");
++
++    if (options.MaxDuplicateGroups < duplicateGroups.Count)
++        Console.WriteLine($"Use --inventory-max-groups <n> to show more groups.");
++
++    Console.WriteLine();
++
++    foreach (LooseContentDuplicateGroup group in duplicateGroups.Take(options.MaxDuplicateGroups))
++    {
++        LooseContentRecord first = group.Records.First();
++        Console.WriteLine($"CONTENT OVERRIDE: {group.IdentityKey}");
++        Console.WriteLine($"  Content Kind: {first.ContentKind}");
++        Console.WriteLine($"  Source File Kind: {first.SourceFileKind}");
++        Console.WriteLine($"  Mods: {group.ModCount}");
++        Console.WriteLine($"  Files: {group.SourceCount}");
++
++        var orderedRecords = OrderLooseContentRecordsForDisplay(group.Records).ToList();
++        int index = 1;
++        foreach (LooseContentRecord record in orderedRecords.Take(options.MaxRecordsPerDuplicateGroup))
++        {
++            Console.WriteLine($"  {index}. Source: {record.SourceName}");
++            Console.WriteLine($"     MO2 Order: {FormatMo2LooseOrder(record)}");
++            Console.WriteLine($"     Relative Path: {record.RelativePath}");
++            Console.WriteLine($"     File: {record.FilePath}");
++            Console.WriteLine($"     Content Kind: {record.ContentKind}");
++            Console.WriteLine($"     Content: {record.DisplayName}");
++            Console.WriteLine($"     JSON Path: {record.JsonPath}");
++            Console.WriteLine($"     Duplicate Policy: {record.DuplicatePolicy}");
++
++            if (IsWinningLooseContentRecord(record, group.Records))
++                Console.WriteLine("     Winning loose-content override: yes");
++
++            index++;
++        }
++
++        int suppressedCount = orderedRecords.Count - Math.Min(options.MaxRecordsPerDuplicateGroup, orderedRecords.Count);
++        if (suppressedCount > 0)
++            Console.WriteLine($"  ... {suppressedCount} more record(s) suppressed. Use --inventory-max-records <n> to show more per group.");
++
++        Console.WriteLine(new string('-', 80));
++    }
++}
++
++static List<LooseContentRecord> ApplyLooseContentFilters(
++    List<LooseContentRecord> records,
++    LooseContentReportOptions options)
++{
++    IEnumerable<LooseContentRecord> query = records;
++
++    if (!options.IncludeDisabled)
++        query = query.Where(r => r.Mo2Enabled == true || r.IsOverwrite);
++
++    if (!string.IsNullOrWhiteSpace(options.ContentKindFilter))
++    {
++        query = query.Where(r =>
++            r.ContentKind.Equals(options.ContentKindFilter, StringComparison.OrdinalIgnoreCase));
++    }
++
++    if (!string.IsNullOrWhiteSpace(options.IdentityContainsFilter))
++    {
++        query = query.Where(r =>
++            r.ContentIdentityKey.Contains(options.IdentityContainsFilter, StringComparison.OrdinalIgnoreCase) ||
++            r.DisplayName.Contains(options.IdentityContainsFilter, StringComparison.OrdinalIgnoreCase));
++    }
++
++    if (!string.IsNullOrWhiteSpace(options.PathContainsFilter))
++    {
++        query = query.Where(r =>
++            r.RelativePath.Contains(options.PathContainsFilter, StringComparison.OrdinalIgnoreCase));
++    }
++
++    return query.ToList();
++}
++
++static void PrintLooseContentDuplicateOverview(List<LooseContentDuplicateGroup> duplicateGroups, int maxGroups)
++{
++    Console.WriteLine($"Top loose content override groups shown: {Math.Min(maxGroups, duplicateGroups.Count)} of {duplicateGroups.Count}");
++
++    if (maxGroups < duplicateGroups.Count)
++        Console.WriteLine($"Use --inventory-max-groups <n> to list more groups in the overview/details.");
++
++    Console.WriteLine();
++
++    foreach (LooseContentDuplicateGroup group in duplicateGroups.Take(maxGroups))
++    {
++        LooseContentRecord first = group.Records.First();
++        string winner = FormatLooseContentWinner(group.Records);
++        Console.WriteLine($"  CONTENT    {group.ModCount,3} mod(s), {group.SourceCount,3} file(s) | {first.ContentKind} | {group.IdentityKey} | winner: {winner}");
++    }
++}
++
++static IEnumerable<LooseContentRecord> OrderLooseContentRecordsForDisplay(IEnumerable<LooseContentRecord> records)
++{
++    return records
++        .OrderBy(r => GetLooseContentWinnerSortValue(r))
++        .ThenBy(r => r.SourceName, StringComparer.OrdinalIgnoreCase)
++        .ThenBy(r => r.RelativePath, StringComparer.OrdinalIgnoreCase)
++        .ThenBy(r => r.JsonPath, StringComparer.OrdinalIgnoreCase)
++        .ThenBy(r => r.FilePath, StringComparer.OrdinalIgnoreCase);
++}
++
++static int GetLooseContentWinnerSortValue(LooseContentRecord record)
++{
++    if (record.IsOverwrite)
++        return int.MinValue;
++
++    return record.Mo2ListIndex ?? int.MaxValue;
++}
++
++static LooseContentRecord? GetWinningLooseContentRecord(IEnumerable<LooseContentRecord> records)
++{
++    return records
++        .Where(r => r.Mo2Enabled == true || r.IsOverwrite)
++        .OrderBy(GetLooseContentWinnerSortValue)
++        .ThenBy(r => r.SourceName, StringComparer.OrdinalIgnoreCase)
++        .ThenBy(r => r.FilePath, StringComparer.OrdinalIgnoreCase)
++        .ThenBy(r => r.JsonPath, StringComparer.OrdinalIgnoreCase)
++        .FirstOrDefault();
++}
++
++static bool IsWinningLooseContentRecord(LooseContentRecord record, IEnumerable<LooseContentRecord> groupRecords)
++{
++    LooseContentRecord? winner = GetWinningLooseContentRecord(groupRecords);
++    return winner != null && winner.Equals(record);
++}
++
++static string FormatLooseContentWinner(IEnumerable<LooseContentRecord> records)
++{
++    LooseContentRecord? winner = GetWinningLooseContentRecord(records);
++
++    if (winner == null)
++        return "no enabled loose content provider";
++
++    return winner.IsOverwrite
++        ? "Overwrite"
++        : $"MO2 {winner.Mo2ListIndex}: {winner.Mo2ModName ?? winner.SourceName}";
++}
++
++static string FormatMo2LooseOrder(LooseContentRecord record)
++{
++    if (record.IsOverwrite)
++        return "Overwrite (highest priority)";
++
++    if (record.Mo2ListIndex.HasValue)
++    {
++        string enabled = record.Mo2Enabled == true ? "enabled" : "disabled";
++        return $"{record.Mo2ListIndex.Value} ({enabled}) {record.Mo2ModName ?? record.SourceName}";
++    }
++
++    return "(not matched)";
++}
++
++static bool IsReportableLooseContentDuplicate(LooseContentRecord record)
++{
++    return record.DuplicatePolicy.StartsWith("Report:", StringComparison.OrdinalIgnoreCase);
++}
++
++static int LooseContentKindSortRank(string contentKind)
++{
++    return contentKind switch
++    {
++        "FlatReplacementRecord" => 0,
++        "FlatReplacementJsonRecord" => 1,
++        "JsonRecord" => 10,
++        _ => 50
++    };
++}
++
+ static void PrintLooseFileInventory(
+     List<LooseFileInventoryRecord> records,
+     LooseInventoryReportOptions options,
+@@ -1923,6 +2466,8 @@ static void PrintUsage()
+     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --loose-inventory --mo2-modlist <modlist.txt> --overwrite <overwrite-folder>");
+     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --loose-inventory --mo2-modlist <modlist.txt> --inventory-details --inventory-max-groups 25");
+     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --loose-inventory --mo2-modlist <modlist.txt> --loose-path-contains Textures");
++    Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --loose-content --mo2-modlist <modlist.txt> --out <loose-content-report.txt>");
++    Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --loose-content --mo2-modlist <modlist.txt> --loose-content-kind FlatReplacementRecord --inventory-details");
+     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --filter-mapid <id>");
+     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --filter-locationid <id>");
+     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --baseline <mapids.txt>");
+@@ -1936,6 +2481,24 @@ static void PrintUsage()
+ 	Console.WriteLine("  DaggerfallEdit.Cli --mods <mods-root-folder> --arena2 <arena2-folder> --no-cache");
+ }
+ 
++public sealed record LooseContentReportOptions(
++    bool IncludeDisabled,
++    bool PrintDuplicateDetails,
++    int MaxDuplicateGroups,
++    int MaxRecordsPerDuplicateGroup,
++    string? ContentKindFilter,
++    string? IdentityContainsFilter,
++    string? PathContainsFilter
++);
++
++public sealed record LooseContentDuplicateGroup(
++    string IdentityKey,
++    List<LooseContentRecord> Records,
++    int SourceCount,
++    int ModCount,
++    bool IsReportable
++);
++
+ public sealed record LooseInventoryReportOptions(
+     bool IncludeDisabled,
+     bool PrintDuplicateDetails,

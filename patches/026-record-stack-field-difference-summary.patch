@@ -1,0 +1,157 @@
+diff --git a/src/DaggerfallEdit.Cli/Program.cs b/src/DaggerfallEdit.Cli/Program.cs
+index b04c060..630923d 100644
+--- a/src/DaggerfallEdit.Cli/Program.cs
++++ b/src/DaggerfallEdit.Cli/Program.cs
+@@ -1248,6 +1248,7 @@ static void PrintLooseContentInventory(
+     Console.WriteLine($"Generic record stacks built: {recordStacks.Count}");
+     Console.WriteLine($"Generic record stacks with multiple source files: {recordStacks.Count(s => s.SourceCount > 1)}");
+     Console.WriteLine($"Generic record stacks with multiple active providers: {recordStacks.Count(s => s.ActiveSourceCount > 1)}");
++    Console.WriteLine($"Generic record stacks with active field differences: {recordStacks.Count(s => GetLooseContentFieldDifferences(s).Count > 0)}");
+ 
+     if (!options.IncludeDisabled)
+         Console.WriteLine("Filter: enabled MO2 mods only for loose content analysis");
+@@ -1307,6 +1308,7 @@ static void PrintLooseContentInventory(
+     Console.WriteLine("Loose content record overrides:");
+ 
+     var duplicateGroups = BuildLooseContentDuplicateGroupsFromStacks(recordStacks);
++    var recordStacksByIdentity = recordStacks.ToDictionary(s => s.Identity.Key, StringComparer.OrdinalIgnoreCase);
+ 
+     if (duplicateGroups.Count == 0)
+     {
+@@ -1346,6 +1348,13 @@ static void PrintLooseContentInventory(
+         Console.WriteLine($"  Mods: {group.ModCount}");
+         Console.WriteLine($"  Files: {group.SourceCount}");
+ 
++        if (recordStacksByIdentity.TryGetValue(group.IdentityKey, out RecordStack? recordStack))
++        {
++            List<RecordFieldDifference> fieldDifferences = GetLooseContentFieldDifferences(recordStack);
++            if (fieldDifferences.Count > 0)
++                Console.WriteLine($"  Active field differences: {FormatRecordFieldDifferenceSummary(fieldDifferences)}");
++        }
++
+         var orderedRecords = OrderLooseContentRecordsForDisplay(group.Records).ToList();
+         int index = 1;
+         foreach (LooseContentRecord record in orderedRecords.Take(options.MaxRecordsPerDuplicateGroup))
+@@ -1386,6 +1395,29 @@ static void PrintLooseContentInventory(
+     }
+ }
+ 
++
++static List<RecordFieldDifference> GetLooseContentFieldDifferences(RecordStack stack)
++{
++    return RecordStackAnalyzer.FindActiveFieldDifferences(stack, GetLooseContentSemanticFieldPaths());
++}
++
++static IReadOnlySet<string> GetLooseContentSemanticFieldPaths()
++{
++    return new HashSet<string>(StringComparer.OrdinalIgnoreCase)
++    {
++        "replacement",
++        "portrait",
++        "ruleContext"
++    };
++}
++
++static string FormatRecordFieldDifferenceSummary(IReadOnlyList<RecordFieldDifference> fieldDifferences)
++{
++    return string.Join(", ", fieldDifferences
++        .OrderBy(d => d.DisplayName, StringComparer.OrdinalIgnoreCase)
++        .Select(d => $"{d.DisplayName} ({d.VariantCount} variants)"));
++}
++
+ static List<LooseContentDuplicateGroup> BuildLooseContentDuplicateGroupsFromStacks(List<RecordStack> recordStacks)
+ {
+     return recordStacks
+diff --git a/src/DaggerfallEdit.Core/RecordStack.cs b/src/DaggerfallEdit.Core/RecordStack.cs
+index b02d30c..32b2dea 100644
+--- a/src/DaggerfallEdit.Core/RecordStack.cs
++++ b/src/DaggerfallEdit.Core/RecordStack.cs
+@@ -36,6 +36,22 @@ public sealed record RecordInstance(
+     IReadOnlyDictionary<string, string> Metadata
+ );
+ 
++
++public sealed record RecordFieldVariant(
++    string? Value,
++    string? NormalizedValue,
++    IReadOnlyList<RecordInstance> Records
++);
++
++public sealed record RecordFieldDifference(
++    string Path,
++    string DisplayName,
++    IReadOnlyList<RecordFieldVariant> Variants
++)
++{
++    public int VariantCount => Variants.Count;
++}
++
+ public sealed record RecordStack(
+     RecordIdentity Identity,
+     IReadOnlyList<RecordInstance> Records,
+@@ -208,3 +224,65 @@ public static class RecordStackBuilder
+         return "unmatched";
+     }
+ }
++
++public static class RecordStackAnalyzer
++{
++    private const string MissingValue = "<missing>";
++
++    public static List<RecordFieldDifference> FindActiveFieldDifferences(
++        RecordStack stack,
++        IReadOnlySet<string>? includedFieldPaths = null,
++        IReadOnlySet<string>? ignoredFieldPaths = null)
++    {
++        var activeRecords = stack.Records
++            .Where(r => r.Provider.IsActive)
++            .ToList();
++
++        if (activeRecords.Count < 2)
++            return new List<RecordFieldDifference>();
++
++        var candidateFields = activeRecords
++            .SelectMany(r => r.Fields)
++            .Where(f => includedFieldPaths == null || includedFieldPaths.Contains(f.Path))
++            .Where(f => ignoredFieldPaths == null || !ignoredFieldPaths.Contains(f.Path))
++            .GroupBy(f => f.Path, StringComparer.OrdinalIgnoreCase)
++            .OrderBy(g => g.Key, StringComparer.OrdinalIgnoreCase);
++
++        var differences = new List<RecordFieldDifference>();
++
++        foreach (var candidateField in candidateFields)
++        {
++            string path = candidateField.Key;
++            string displayName = candidateField.FirstOrDefault()?.DisplayName ?? path;
++
++            var variants = activeRecords
++                .Select(record =>
++                {
++                    RecordFieldValue? field = record.Fields.FirstOrDefault(f =>
++                        f.Path.Equals(path, StringComparison.OrdinalIgnoreCase));
++
++                    string? value = field?.Value;
++                    string normalized = field?.NormalizedValue ?? field?.Value ?? MissingValue;
++
++                    return new
++                    {
++                        Record = record,
++                        Value = value,
++                        NormalizedValue = normalized
++                    };
++                })
++                .GroupBy(v => v.NormalizedValue, StringComparer.OrdinalIgnoreCase)
++                .Select(g => new RecordFieldVariant(
++                    Value: g.First().Value,
++                    NormalizedValue: g.Key,
++                    Records: g.Select(v => v.Record).ToList()))
++                .OrderBy(v => v.Value ?? MissingValue, StringComparer.OrdinalIgnoreCase)
++                .ToList();
++
++            if (variants.Count > 1)
++                differences.Add(new RecordFieldDifference(path, displayName, variants));
++        }
++
++        return differences;
++    }
++}

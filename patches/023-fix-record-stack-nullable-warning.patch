@@ -1,0 +1,23 @@
+diff --git a/src/DaggerfallEdit.Core/RecordStack.cs b/src/DaggerfallEdit.Core/RecordStack.cs
+--- a/src/DaggerfallEdit.Core/RecordStack.cs
++++ b/src/DaggerfallEdit.Core/RecordStack.cs
+@@ -159,7 +159,7 @@ public static class RecordStackBuilder
+         var orderedRecords = records
+             .OrderBy(r => r.Provider.WinnerSortOrder)
+             .ThenBy(r => r.Provider.SourceName, StringComparer.OrdinalIgnoreCase)
+-            .ThenBy(r => r.Provider.RelativePath, StringComparer.OrdinalIgnoreCase)
++            .ThenBy(r => r.Provider.RelativePath ?? string.Empty, StringComparer.OrdinalIgnoreCase)
+             .ThenBy(r => r.InstancePath, StringComparer.OrdinalIgnoreCase)
+             .ToList();
+ 
+diff --git a/src/DaggerfallEdit.Cli/Program.cs b/src/DaggerfallEdit.Cli/Program.cs
+--- a/src/DaggerfallEdit.Cli/Program.cs
++++ b/src/DaggerfallEdit.Cli/Program.cs
+@@ -1382,6 +1382,7 @@ static List<LooseContentDuplicateGroup> BuildLooseContentDuplicateGroupsFromStack
+             ModCount: s.ModCount,
+             IsReportable: s.Records.Any(r =>
+                 r.Metadata.TryGetValue("DuplicatePolicy", out string? duplicatePolicy) &&
++                !string.IsNullOrEmpty(duplicatePolicy) &&
+                 duplicatePolicy.StartsWith("Report:", StringComparison.OrdinalIgnoreCase))))
+         .Where(g => g.Records.Count > 0)
+         .OrderByDescending(g => g.IsReportable)

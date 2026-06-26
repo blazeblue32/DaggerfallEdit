@@ -1,0 +1,294 @@
+diff --git a/src/DaggerfallEdit.Cli/Program.cs b/src/DaggerfallEdit.Cli/Program.cs
+index 630923d..b81f867 100644
+--- a/src/DaggerfallEdit.Cli/Program.cs
++++ b/src/DaggerfallEdit.Cli/Program.cs
+@@ -772,6 +772,8 @@ static List<LooseContentRecord> ScanLooseContentInventory(List<LooseFileInventor
+     Console.WriteLine("This scans content inside physical loose files, so overridden loser records remain visible for xEdit-style stacks.");
+ 
+     var contentRecords = new List<LooseContentRecord>();
++    Dictionary<string, string> activeLooseFileByRelativePath = BuildActiveLooseFilePathLookup(looseFileRecords);
++
+     var jsonFiles = looseFileRecords
+         .Where(r => r.Extension.Equals(".json", StringComparison.OrdinalIgnoreCase))
+         .OrderBy(r => GetLooseWinnerSortValue(r))
+@@ -787,7 +789,8 @@ static List<LooseContentRecord> ScanLooseContentInventory(List<LooseFileInventor
+     {
+         try
+         {
+-            List<LooseContentRecord> fileContentRecords = ExtractLooseJsonContentRecords(fileRecord).ToList();
++            bool looseFileActive = IsActiveLooseFileRecord(fileRecord, activeLooseFileByRelativePath);
++            List<LooseContentRecord> fileContentRecords = ExtractLooseJsonContentRecords(fileRecord, looseFileActive).ToList();
+             filesParsed++;
+ 
+             if (fileContentRecords.Count > 0)
+@@ -812,7 +815,36 @@ static List<LooseContentRecord> ScanLooseContentInventory(List<LooseFileInventor
+     return contentRecords;
+ }
+ 
+-static IEnumerable<LooseContentRecord> ExtractLooseJsonContentRecords(LooseFileInventoryRecord fileRecord)
++static Dictionary<string, string> BuildActiveLooseFilePathLookup(List<LooseFileInventoryRecord> looseFileRecords)
++{
++    return looseFileRecords
++        .Where(r => r.IsOverwrite || r.Mo2Enabled == true)
++        .GroupBy(r => NormalizeRelativePath(r.RelativePath), StringComparer.OrdinalIgnoreCase)
++        .Select(g => g
++            .OrderBy(GetLooseWinnerSortValue)
++            .ThenBy(r => r.ModName, StringComparer.OrdinalIgnoreCase)
++            .ThenBy(r => r.FilePath, StringComparer.OrdinalIgnoreCase)
++            .First())
++        .ToDictionary(
++            r => NormalizeRelativePath(r.RelativePath),
++            r => r.FilePath,
++            StringComparer.OrdinalIgnoreCase);
++}
++
++static bool IsActiveLooseFileRecord(
++    LooseFileInventoryRecord fileRecord,
++    Dictionary<string, string> activeLooseFileByRelativePath)
++{
++    if (!fileRecord.IsOverwrite && fileRecord.Mo2Enabled != true)
++        return false;
++
++    return activeLooseFileByRelativePath.TryGetValue(
++            NormalizeRelativePath(fileRecord.RelativePath),
++            out string? activeFilePath) &&
++        activeFilePath.Equals(fileRecord.FilePath, StringComparison.OrdinalIgnoreCase);
++}
++
++static IEnumerable<LooseContentRecord> ExtractLooseJsonContentRecords(LooseFileInventoryRecord fileRecord, bool looseFileActive)
+ {
+     string text = File.ReadAllText(fileRecord.FilePath);
+ 
+@@ -856,8 +888,9 @@ static IEnumerable<LooseContentRecord> ExtractLooseJsonContentRecords(LooseFileI
+                 ReplacementName: replacementName,
+                 PortraitName: portraitName,
+                 RuleContext: ruleContext,
++                LooseFileActive: looseFileActive,
+                 SourceByteLength: fileRecord.ByteLength,
+-                DuplicatePolicy: "Report: loose content record override",
++                DuplicatePolicy: GetLooseContentDuplicatePolicy(contentKind),
+                 IsOverwrite: fileRecord.IsOverwrite,
+                 Mo2ModName: fileRecord.Mo2ModName,
+                 Mo2Enabled: fileRecord.Mo2Enabled,
+@@ -867,6 +900,19 @@ static IEnumerable<LooseContentRecord> ExtractLooseJsonContentRecords(LooseFileI
+     }
+ }
+ 
++
++static string GetLooseContentDuplicatePolicy(string contentKind)
++{
++    return IsRuntimeRuleSetContentKind(contentKind)
++        ? "Report: loose content runtime rule overlap"
++        : "Report: loose content record override";
++}
++
++static bool IsRuntimeRuleSetContentKind(string contentKind)
++{
++    return contentKind.Equals("FlatReplacementRecord", StringComparison.OrdinalIgnoreCase);
++}
++
+ static string NormalizeLooseJsonForLenientParsing(string text)
+ {
+     // Some DFU loose data files are accepted by their target mod even though they are
+@@ -1244,14 +1290,14 @@ static void PrintLooseContentInventory(
+         Console.WriteLine($"Loose content records matching filters: {reportRecords.Count}");
+ 
+     Console.WriteLine($"Loose source folders with content records: {reportRecords.Select(r => r.SourceFolderPath).Distinct(StringComparer.OrdinalIgnoreCase).Count()}");
+-    Console.WriteLine($"Enabled loose source folders with content records: {reportRecords.Where(r => r.Mo2Enabled == true).Select(r => r.SourceFolderPath).Distinct(StringComparer.OrdinalIgnoreCase).Count()}");
++    Console.WriteLine($"Runtime-visible loose source folders with content records: {reportRecords.Where(r => r.LooseFileActive).Select(r => r.SourceFolderPath).Distinct(StringComparer.OrdinalIgnoreCase).Count()}");
+     Console.WriteLine($"Generic record stacks built: {recordStacks.Count}");
+     Console.WriteLine($"Generic record stacks with multiple source files: {recordStacks.Count(s => s.SourceCount > 1)}");
+     Console.WriteLine($"Generic record stacks with multiple active providers: {recordStacks.Count(s => s.ActiveSourceCount > 1)}");
+     Console.WriteLine($"Generic record stacks with active field differences: {recordStacks.Count(s => GetLooseContentFieldDifferences(s).Count > 0)}");
+ 
+     if (!options.IncludeDisabled)
+-        Console.WriteLine("Filter: enabled MO2 mods only for loose content analysis");
++        Console.WriteLine("Filter: runtime-visible loose files only for loose content analysis");
+ 
+     if (!string.IsNullOrWhiteSpace(options.ContentKindFilter))
+         Console.WriteLine($"Filter: Loose content kind = {options.ContentKindFilter}");
+@@ -1268,7 +1314,8 @@ static void PrintLooseContentInventory(
+     Console.WriteLine($"  Entries: {mo2LoadOrder.Entries.Count}");
+     Console.WriteLine($"  Enabled entries: {mo2LoadOrder.Entries.Count(e => e.Enabled)}");
+     Console.WriteLine($"  Disabled entries: {mo2LoadOrder.Entries.Count(e => !e.Enabled)}");
+-    Console.WriteLine("  Winner rule used here: same as loose files; earlier enabled modlist.txt entries override later entries, and Overwrite is highest priority.");
++    Console.WriteLine("  Visibility rule used here: same relative path uses loose-file winner; earlier enabled modlist.txt entries override later entries, and Overwrite is highest priority.");
++    Console.WriteLine("  FlatReplacement records do not have a load-order winner. All records from runtime-visible JSON files are candidates; Flat Replacer Priority/random selection decides matching replacements.");
+     Console.WriteLine("  Note: This pass reports recognised internal records inside structured loose files, not whole-file path overrides.");
+ 
+     if (!string.IsNullOrWhiteSpace(overwritePath))
+@@ -1305,7 +1352,7 @@ static void PrintLooseContentInventory(
+     }
+ 
+     Console.WriteLine();
+-    Console.WriteLine("Loose content record overrides:");
++    Console.WriteLine("Loose content record stacks:");
+ 
+     var duplicateGroups = BuildLooseContentDuplicateGroupsFromStacks(recordStacks);
+     var recordStacksByIdentity = recordStacks.ToDictionary(s => s.Identity.Key, StringComparer.OrdinalIgnoreCase);
+@@ -1316,7 +1363,7 @@ static void PrintLooseContentInventory(
+         return;
+     }
+ 
+-    Console.WriteLine($"  Reportable loose content override group(s): {duplicateGroups.Count(g => g.IsReportable)}");
++    Console.WriteLine($"  Reportable loose content stack group(s): {duplicateGroups.Count(g => g.IsReportable)}");
+     Console.WriteLine($"  Groups selected for output: {duplicateGroups.Count}");
+     Console.WriteLine();
+ 
+@@ -1342,7 +1389,7 @@ static void PrintLooseContentInventory(
+     foreach (LooseContentDuplicateGroup group in duplicateGroups.Take(options.MaxDuplicateGroups))
+     {
+         LooseContentRecord first = group.Records.First();
+-        Console.WriteLine($"CONTENT OVERRIDE: {group.IdentityKey}");
++        Console.WriteLine($"CONTENT STACK: {group.IdentityKey}");
+         Console.WriteLine($"  Content Kind: {first.ContentKind}");
+         Console.WriteLine($"  Source File Kind: {first.SourceFileKind}");
+         Console.WriteLine($"  Mods: {group.ModCount}");
+@@ -1380,9 +1427,17 @@ static void PrintLooseContentInventory(
+ 
+             Console.WriteLine($"     JSON Path: {record.JsonPath}");
+             Console.WriteLine($"     Duplicate Policy: {record.DuplicatePolicy}");
++            Console.WriteLine($"     Loose File Visibility: {FormatLooseContentVisibility(record)}");
+ 
+-            if (IsWinningLooseContentRecord(record, group.Records))
++            if (IsRuntimeRuleSetContentKind(record.ContentKind))
++            {
++                if (record.LooseFileActive)
++                    Console.WriteLine("     Active runtime candidate: yes");
++            }
++            else if (IsWinningLooseContentRecord(record, group.Records))
++            {
+                 Console.WriteLine("     Winning loose-content override: yes");
++            }
+ 
+             index++;
+         }
+@@ -1460,13 +1515,15 @@ static LooseContentRecord? RehydrateLooseContentRecord(RecordInstance instance)
+         !metadata.TryGetValue("DisplayName", out string? displayName) ||
+         !metadata.TryGetValue("SourceByteLength", out string? sourceByteLengthText) ||
+         !metadata.TryGetValue("DuplicatePolicy", out string? duplicatePolicy) ||
+-        !metadata.TryGetValue("IsOverwrite", out string? isOverwriteText))
++        !metadata.TryGetValue("IsOverwrite", out string? isOverwriteText) ||
++        !metadata.TryGetValue("LooseFileActive", out string? looseFileActiveText))
+     {
+         return null;
+     }
+ 
+     long.TryParse(sourceByteLengthText, out long sourceByteLength);
+     bool.TryParse(isOverwriteText, out bool isOverwrite);
++    bool.TryParse(looseFileActiveText, out bool looseFileActive);
+ 
+     bool? mo2Enabled = null;
+     if (metadata.TryGetValue("Mo2Enabled", out string? mo2EnabledText) &&
+@@ -1510,6 +1567,7 @@ static LooseContentRecord? RehydrateLooseContentRecord(RecordInstance instance)
+         ReplacementName: replacementName,
+         PortraitName: portraitName,
+         RuleContext: ruleContext,
++        LooseFileActive: looseFileActive,
+         SourceByteLength: sourceByteLength,
+         DuplicatePolicy: duplicatePolicy,
+         IsOverwrite: isOverwrite,
+@@ -1526,7 +1584,7 @@ static List<LooseContentRecord> ApplyLooseContentFilters(
+     IEnumerable<LooseContentRecord> query = records;
+ 
+     if (!options.IncludeDisabled)
+-        query = query.Where(r => r.Mo2Enabled == true || r.IsOverwrite);
++        query = query.Where(r => r.LooseFileActive);
+ 
+     if (!string.IsNullOrWhiteSpace(options.ContentKindFilter))
+     {
+@@ -1562,8 +1620,8 @@ static void PrintLooseContentDuplicateOverview(List<LooseContentDuplicateGroup>
+     foreach (LooseContentDuplicateGroup group in duplicateGroups.Take(maxGroups))
+     {
+         LooseContentRecord first = group.Records.First();
+-        string winner = FormatLooseContentWinner(group.Records);
+-        Console.WriteLine($"  CONTENT    {group.ModCount,3} mod(s), {group.SourceCount,3} file(s) | {first.ContentKind} | {group.IdentityKey} | winner: {winner}");
++        string resolution = FormatLooseContentResolution(first.ContentKind, group.Records);
++        Console.WriteLine($"  CONTENT    {group.ModCount,3} mod(s), {group.SourceCount,3} file(s) | {first.ContentKind} | {group.IdentityKey} | {resolution}");
+     }
+ }
+ 
+@@ -1588,7 +1646,7 @@ static int GetLooseContentWinnerSortValue(LooseContentRecord record)
+ static LooseContentRecord? GetWinningLooseContentRecord(IEnumerable<LooseContentRecord> records)
+ {
+     return records
+-        .Where(r => r.Mo2Enabled == true || r.IsOverwrite)
++        .Where(r => r.LooseFileActive)
+         .OrderBy(GetLooseContentWinnerSortValue)
+         .ThenBy(r => r.SourceName, StringComparer.OrdinalIgnoreCase)
+         .ThenBy(r => r.FilePath, StringComparer.OrdinalIgnoreCase)
+@@ -1602,12 +1660,31 @@ static bool IsWinningLooseContentRecord(LooseContentRecord record, IEnumerable<L
+     return winner != null && winner.Equals(record);
+ }
+ 
++static string FormatLooseContentResolution(string contentKind, IEnumerable<LooseContentRecord> records)
++{
++    if (IsRuntimeRuleSetContentKind(contentKind))
++        return "runtime candidates; Priority/random selection";
++
++    return $"winner: {FormatLooseContentWinner(records)}";
++}
++
++static string FormatLooseContentVisibility(LooseContentRecord record)
++{
++    if (record.LooseFileActive)
++        return "runtime-visible";
++
++    if (record.Mo2Enabled == false)
++        return "inactive (MO2 disabled)";
++
++    return "inactive (loose path overridden)";
++}
++
+ static string FormatLooseContentWinner(IEnumerable<LooseContentRecord> records)
+ {
+     LooseContentRecord? winner = GetWinningLooseContentRecord(records);
+ 
+     if (winner == null)
+-        return "no enabled loose content provider";
++        return "no runtime-visible loose content provider";
+ 
+     return winner.IsOverwrite
+         ? "Overwrite"
+diff --git a/src/DaggerfallEdit.Core/LooseContentRecord.cs b/src/DaggerfallEdit.Core/LooseContentRecord.cs
+index 8f61df3..cf362ab 100644
+--- a/src/DaggerfallEdit.Core/LooseContentRecord.cs
++++ b/src/DaggerfallEdit.Core/LooseContentRecord.cs
+@@ -15,6 +15,7 @@ public sealed record LooseContentRecord(
+     string? ReplacementName,
+     string? PortraitName,
+     string? RuleContext,
++    bool LooseFileActive,
+     long SourceByteLength,
+     string DuplicatePolicy,
+     bool IsOverwrite,
+diff --git a/src/DaggerfallEdit.Core/RecordStack.cs b/src/DaggerfallEdit.Core/RecordStack.cs
+index 32b2dea..ec14292 100644
+--- a/src/DaggerfallEdit.Core/RecordStack.cs
++++ b/src/DaggerfallEdit.Core/RecordStack.cs
+@@ -110,7 +110,7 @@ public static class RecordStackBuilder
+             Key: record.ContentIdentityKey,
+             DisplayName: record.DisplayName);
+ 
+-        bool isActive = record.IsOverwrite || record.Mo2Enabled == true;
++        bool isActive = record.LooseFileActive;
+         int winnerSortOrder = record.IsOverwrite ? int.MinValue : record.Mo2ListIndex ?? int.MaxValue;
+ 
+         var provider = new RecordProvider(
+@@ -149,13 +149,15 @@ public static class RecordStackBuilder
+             ["DisplayName"] = record.DisplayName,
+             ["SourceByteLength"] = record.SourceByteLength.ToString(),
+             ["DuplicatePolicy"] = record.DuplicatePolicy,
+-            ["IsOverwrite"] = record.IsOverwrite.ToString()
++            ["IsOverwrite"] = record.IsOverwrite.ToString(),
++            ["LooseFileActive"] = record.LooseFileActive.ToString()
+         };
+ 
+         AddOptionalMetadata(metadata, "Target", record.TargetName);
+         AddOptionalMetadata(metadata, "Replacement", record.ReplacementName);
+         AddOptionalMetadata(metadata, "Portrait", record.PortraitName);
+         AddOptionalMetadata(metadata, "RuleContext", record.RuleContext);
++        AddOptionalMetadata(metadata, "LooseFileActive", record.LooseFileActive.ToString());
+         AddOptionalMetadata(metadata, "Mo2ModName", record.Mo2ModName);
+         AddOptionalMetadata(metadata, "Mo2Enabled", record.Mo2Enabled?.ToString());
+         AddOptionalMetadata(metadata, "Mo2ListIndex", record.Mo2ListIndex?.ToString());
