@@ -16,12 +16,14 @@ public sealed record CachedMapIdScan(
 
 public sealed class ScanCacheData
 {
-    public int SchemaVersion { get; set; } = 1;
+    public int SchemaVersion { get; set; } = ScanCache.CurrentSchemaVersion;
     public List<CachedMapIdScan> Entries { get; set; } = new();
 }
 
 public sealed class ScanCache
 {
+    public const int CurrentSchemaVersion = 3;
+
     private readonly string cachePath;
     private readonly ScanCacheData data;
 
@@ -46,7 +48,7 @@ public sealed class ScanCache
                         PropertyNameCaseInsensitive = true
                     });
 
-                if (loaded != null)
+                if (loaded != null && loaded.SchemaVersion == CurrentSchemaVersion)
                     return new ScanCache(cachePath, loaded);
             }
         }

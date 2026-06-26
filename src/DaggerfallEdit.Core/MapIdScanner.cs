@@ -5,6 +5,8 @@ namespace DaggerfallEdit.Core;
 
 public static class MapIdScanner
 {
+    private const int CollisionMapIdMask = 0x000fffff;
+
     public static IEnumerable<MapIdRecord> ExtractMapIds(TextAssetInfo asset)
     {
         if (string.IsNullOrWhiteSpace(asset.Text))
@@ -25,6 +27,7 @@ public static class MapIdScanner
             });
 
             jsonRecords = WalkJson(asset, doc.RootElement, "$").ToList();
+            PreferMapTableLocationIds(jsonRecords);
             parsedJson = true;
         }
         catch
@@ -61,6 +64,11 @@ public static class MapIdScanner
                 int? latitude = TryGetIntProperty(element, "Latitude")
                              ?? TryGetIntProperty(element, "latitude");
 
+                int? locationId = TryGetIntProperty(element, "LocationId")
+                               ?? TryGetIntProperty(element, "locationId")
+                               ?? TryGetIntProperty(element, "LocationID")
+                               ?? TryGetIntProperty(element, "locationID");
+
                 string? recordName = TryGetStringProperty(element, "Name")
                                   ?? TryGetStringProperty(element, "name")
                                   ?? TryGetStringProperty(element, "LocationName")
@@ -69,6 +77,18 @@ public static class MapIdScanner
                 if (mapId.HasValue)
                 {
                     yield return FromLocationMapId(asset, mapId.Value, path, recordName, "MapId field");
+
+                    int collisionMapId = mapId.Value & CollisionMapIdMask;
+
+                    if (collisionMapId != mapId.Value)
+                    {
+                        yield return FromLocationMapId(
+                            asset,
+                            collisionMapId,
+                            path,
+                            recordName,
+                            $"MapId lower-20 collision key from raw MapId {mapId.Value}");
+                    }
                 }
                 else if (longitude.HasValue && latitude.HasValue)
                 {
@@ -82,6 +102,21 @@ public static class MapIdScanner
                         path,
                         recordName,
                         "Longitude/Latitude derived");
+                }
+
+                if (locationId.HasValue && locationId.Value > 0)
+                {
+                    string? locationIdSource = GetLocationIdSource(path);
+
+                    if (locationIdSource != null)
+                    {
+                        yield return FromLocationId(
+                            asset,
+                            locationId.Value,
+                            path,
+                            recordName,
+                            locationIdSource);
+                    }
                 }
 
                 foreach (JsonProperty property in element.EnumerateObject())
@@ -182,6 +217,28 @@ public static class MapIdScanner
             Source: source);
     }
 
+    private static MapIdRecord FromLocationId(
+        TextAssetInfo asset,
+        int locationId,
+        string path,
+        string? recordName,
+        string source)
+    {
+        return new MapIdRecord(
+            MapId: locationId,
+            X: null,
+            Y: null,
+            Longitude: null,
+            Latitude: null,
+            ModName: asset.ModName,
+            DfmodPath: asset.DfmodPath,
+            AssetName: asset.AssetName,
+            JsonPath: path,
+            RecordName: recordName,
+            AssetKind: ClassifyAssetKind(asset.AssetName),
+            Source: source);
+    }
+
     private static MapIdRecord FromWorldCoordinates(
         TextAssetInfo asset,
         int mapId,
@@ -215,6 +272,42 @@ public static class MapIdScanner
         int y = 499 - (latitude / 128);
 
         return y * 1000 + x;
+    }
+
+    private static string? GetLocationIdSource(string path)
+    {
+        if (path.EndsWith(".MapTableData", StringComparison.OrdinalIgnoreCase))
+            return "MapTableData LocationId field";
+
+        // DFU's classic/vanilla fast path reads LocationId from the exterior record header.
+        // For injected locations, MapTableData.LocationId is preferred when present; this
+        // exterior-header record is only a fallback for older/partial locationnew JSON.
+        // Do not scan Dungeon.RecordElement.Header here: dungeon headers have their own
+        // paired IDs and are not the identity key inserted by ContentReader.
+        if (path.EndsWith(".Exterior.RecordElement.Header", StringComparison.OrdinalIgnoreCase))
+            return "Exterior header LocationId fallback";
+
+        return null;
+    }
+
+    private static void PreferMapTableLocationIds(List<MapIdRecord> records)
+    {
+        bool hasMapTableLocationId = records.Any(IsMapTableLocationIdRecord);
+
+        if (!hasMapTableLocationId)
+            return;
+
+        records.RemoveAll(IsExteriorHeaderLocationIdFallbackRecord);
+    }
+
+    private static bool IsMapTableLocationIdRecord(MapIdRecord record)
+    {
+        return record.Source.Contains("MapTableData LocationId", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsExteriorHeaderLocationIdFallbackRecord(MapIdRecord record)
+    {
+        return record.Source.Contains("Exterior header LocationId fallback", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string ClassifyAssetKind(string assetName)

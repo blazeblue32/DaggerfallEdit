@@ -1,0 +1,17 @@
+diff --git a/src/DaggerfallEdit.Vanilla/MapsBsaBaselineExtractor.cs b/src/DaggerfallEdit.Vanilla/MapsBsaBaselineExtractor.cs
+index 7286494..5913ad7 100644
+--- a/src/DaggerfallEdit.Vanilla/MapsBsaBaselineExtractor.cs
++++ b/src/DaggerfallEdit.Vanilla/MapsBsaBaselineExtractor.cs
+@@ -51,6 +51,12 @@ public static class MapsBsaBaselineExtractor
+                 continue;
+             }
+ 
++            // Daggerfall Unity treats regions with any empty MAPS.BSA region record as unloaded.
++            // Some vanilla regions have zero-length MAPNAMES/MAPTABLE records, so skip them
++            // instead of throwing while building the baseline.
++            if (mapNamesBytes.Length < 4 || mapTableBytes.Length == 0)
++                continue;
++
+             List<string> mapNames = ReadMapNames(mapNamesBytes.Span, mapNamesRecord);
+             List<MapTableEntry> mapTable = ReadMapTable(mapTableBytes.Span, mapNames.Count, mapTableRecord);
+             string regionName = GetRegionName(regionIndex);

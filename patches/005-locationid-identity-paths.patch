@@ -1,0 +1,96 @@
+diff --git a/src/DaggerfallEdit.Core/MapIdScanner.cs b/src/DaggerfallEdit.Core/MapIdScanner.cs
+index dcd275e..6ac817e 100644
+--- a/src/DaggerfallEdit.Core/MapIdScanner.cs
++++ b/src/DaggerfallEdit.Core/MapIdScanner.cs
+@@ -27,6 +27,7 @@ public static class MapIdScanner
+             });
+ 
+             jsonRecords = WalkJson(asset, doc.RootElement, "$").ToList();
++            PreferMapTableLocationIds(jsonRecords);
+             parsedJson = true;
+         }
+         catch
+@@ -103,14 +104,19 @@ public static class MapIdScanner
+                         "Longitude/Latitude derived");
+                 }
+ 
+-                if (locationId.HasValue && locationId.Value > 0 && IsLocationIdentityPath(path))
++                if (locationId.HasValue && locationId.Value > 0)
+                 {
+-                    yield return FromLocationId(
+-                        asset,
+-                        locationId.Value,
+-                        path,
+-                        recordName,
+-                        "LocationId field");
++                    string? locationIdSource = GetLocationIdSource(path);
++
++                    if (locationIdSource != null)
++                    {
++                        yield return FromLocationId(
++                            asset,
++                            locationId.Value,
++                            path,
++                            recordName,
++                            locationIdSource);
++                    }
+                 }
+ 
+                 foreach (JsonProperty property in element.EnumerateObject())
+@@ -268,10 +274,40 @@ public static class MapIdScanner
+         return y * 1000 + x;
+     }
+ 
+-    private static bool IsLocationIdentityPath(string path)
++    private static string? GetLocationIdSource(string path)
++    {
++        if (path.EndsWith(".MapTableData", StringComparison.OrdinalIgnoreCase))
++            return "MapTableData LocationId field";
++
++        // DFU's classic/vanilla fast path reads LocationId from the exterior record header.
++        // For injected locations, MapTableData.LocationId is preferred when present; this
++        // exterior-header record is only a fallback for older/partial locationnew JSON.
++        // Do not scan Dungeon.RecordElement.Header here: dungeon headers have their own
++        // paired IDs and are not the identity key inserted by ContentReader.
++        if (path.EndsWith(".Exterior.RecordElement.Header", StringComparison.OrdinalIgnoreCase))
++            return "Exterior header LocationId fallback";
++
++        return null;
++    }
++
++    private static void PreferMapTableLocationIds(List<MapIdRecord> records)
++    {
++        bool hasMapTableLocationId = records.Any(IsMapTableLocationIdRecord);
++
++        if (!hasMapTableLocationId)
++            return;
++
++        records.RemoveAll(IsExteriorHeaderLocationIdFallbackRecord);
++    }
++
++    private static bool IsMapTableLocationIdRecord(MapIdRecord record)
++    {
++        return record.Source.Contains("MapTableData LocationId", StringComparison.OrdinalIgnoreCase);
++    }
++
++    private static bool IsExteriorHeaderLocationIdFallbackRecord(MapIdRecord record)
+     {
+-        return path.EndsWith(".RecordElement.Header", StringComparison.OrdinalIgnoreCase) ||
+-               path.EndsWith(".MapTableData", StringComparison.OrdinalIgnoreCase);
++        return record.Source.Contains("Exterior header LocationId fallback", StringComparison.OrdinalIgnoreCase);
+     }
+ 
+     private static string ClassifyAssetKind(string assetName)
+diff --git a/src/DaggerfallEdit.Core/ScanCache.cs b/src/DaggerfallEdit.Core/ScanCache.cs
+index a01b53f..1a77b19 100644
+--- a/src/DaggerfallEdit.Core/ScanCache.cs
++++ b/src/DaggerfallEdit.Core/ScanCache.cs
+@@ -22,7 +22,7 @@ public sealed class ScanCacheData
+ 
+ public sealed class ScanCache
+ {
+-    public const int CurrentSchemaVersion = 2;
++    public const int CurrentSchemaVersion = 3;
+ 
+     private readonly string cachePath;
+     private readonly ScanCacheData data;

@@ -1,0 +1,13 @@
+diff --git a/src/DaggerfallEdit.Cli/Program.cs b/src/DaggerfallEdit.Cli/Program.cs
+index b0dfd95..237f403 100644
+--- a/src/DaggerfallEdit.Cli/Program.cs
++++ b/src/DaggerfallEdit.Cli/Program.cs
+@@ -448,7 +448,7 @@ static void PrintConflicts(
+             Console.WriteLine($"     Name: {record.RecordName ?? "(unknown)"}");
+             Console.WriteLine($"     Source: {entry.Sources}");
+ 
+-            if (identitySummariesByAsset.TryGetValue(GetAssetKey(record), out AssetIdentitySummary identitySummary))
++            if (identitySummariesByAsset.TryGetValue(GetAssetKey(record), out var identitySummary) && identitySummary is not null)
+             {
+                 Console.WriteLine($"     MapId(s): {identitySummary.MapIds}");
+                 Console.WriteLine($"     LocationId(s): {identitySummary.LocationIds}");
