@@ -45,7 +45,14 @@ public static class AssetStudioAssetInventoryExtractor
                     ByteLength: TryGetKnownPayloadLength(obj, className),
                     ContainerPath: containerPath,
                     HasStableName: hasStableName,
-                    DuplicatePolicy: duplicatePolicy);
+                    DuplicatePolicy: duplicatePolicy,
+                    DfuFileName: null,
+                    DfuTitle: null,
+                    DfuEnabled: null,
+                    DfuLoadPriority: null,
+                    Mo2ModName: null,
+                    Mo2Enabled: null,
+                    Mo2ListIndex: null);
             }
         }
     }
@@ -72,14 +79,28 @@ public static class AssetStudioAssetInventoryExtractor
             if (LooksLikeExistingLocationAsset(assetName))
                 return "ExistingLocationOverride";
 
-            if (assetName.Contains("quest", StringComparison.OrdinalIgnoreCase))
+            if (assetName.Equals("ItemTemplates", StringComparison.OrdinalIgnoreCase))
+                return "ItemTemplates";
+
+            if (LooksLikeClassicRmbBlockAsset(assetName))
+                return "BlockLayoutRMB";
+
+            if (LooksLikeClassicRdbBlockAsset(assetName))
+                return "DungeonBlockRDB";
+
+            if (LooksLikeTextureFrameMetadata(assetName))
+                return "TextureFrameMetadata";
+
+            if (LooksLikeQuestAsset(assetName))
                 return "QuestOrQuestText";
 
-            if (assetName.Contains("local", StringComparison.OrdinalIgnoreCase) ||
-                assetName.Contains("lang", StringComparison.OrdinalIgnoreCase))
+            if (LooksLikeBookOrTextResource(assetName))
+                return "BookOrTextResource";
+
+            if (LooksLikeLocalizationAsset(assetName))
                 return "LocalizationOrText";
 
-            return "TextAsset";
+            return "UnknownTextAsset";
         }
 
         return className switch
@@ -155,6 +176,48 @@ public static class AssetStudioAssetInventoryExtractor
         return parts.Length >= 3 &&
                int.TryParse(parts[1], out _) &&
                int.TryParse(parts[2], out _);
+    }
+
+    private static bool LooksLikeClassicRmbBlockAsset(string assetName)
+    {
+        return assetName.EndsWith(".RMB", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool LooksLikeClassicRdbBlockAsset(string assetName)
+    {
+        return assetName.EndsWith(".RDB", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool LooksLikeTextureFrameMetadata(string assetName)
+    {
+        string[] parts = assetName.Split('_', '-', StringSplitOptions.RemoveEmptyEntries);
+
+        return parts.Length == 3 &&
+               int.TryParse(parts[0], out _) &&
+               int.TryParse(parts[1], out _) &&
+               int.TryParse(parts[2], out _);
+    }
+
+    private static bool LooksLikeQuestAsset(string assetName)
+    {
+        return assetName.Contains("quest", StringComparison.OrdinalIgnoreCase) ||
+               assetName.StartsWith("QRC", StringComparison.OrdinalIgnoreCase) ||
+               assetName.StartsWith("QBN", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool LooksLikeBookOrTextResource(string assetName)
+    {
+        return assetName.Contains("book", StringComparison.OrdinalIgnoreCase) ||
+               assetName.Contains("biog", StringComparison.OrdinalIgnoreCase) ||
+               assetName.EndsWith(".TXT", StringComparison.OrdinalIgnoreCase) ||
+               assetName.EndsWith(".RSC", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool LooksLikeLocalizationAsset(string assetName)
+    {
+        return assetName.Contains("local", StringComparison.OrdinalIgnoreCase) ||
+               assetName.Contains("lang", StringComparison.OrdinalIgnoreCase) ||
+               assetName.Contains("translation", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string BuildIdentityKey(

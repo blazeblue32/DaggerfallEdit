@@ -11,5 +11,12 @@ public sealed record AssetInventoryRecord(
     long? ByteLength,
     string? ContainerPath,
     bool HasStableName,
-    string DuplicatePolicy
+    string DuplicatePolicy,
+    string? DfuFileName,
+    string? DfuTitle,
+    bool? DfuEnabled,
+    int? DfuLoadPriority,
+    string? Mo2ModName,
+    bool? Mo2Enabled,
+    int? Mo2ListIndex
 );

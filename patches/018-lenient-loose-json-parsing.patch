@@ -1,0 +1,98 @@
+diff --git a/src/DaggerfallEdit.Cli/Program.cs b/src/DaggerfallEdit.Cli/Program.cs
+index 0000000..0000000 100644
+--- a/src/DaggerfallEdit.Cli/Program.cs
++++ b/src/DaggerfallEdit.Cli/Program.cs
+@@ -816,7 +816,12 @@ static IEnumerable<LooseContentRecord> ExtractLooseJsonContentRecords(LooseFileInventoryRecord fileRecord)
+ {
+     string text = File.ReadAllText(fileRecord.FilePath);
+ 
+-    using JsonDocument document = JsonDocument.Parse(text, new JsonDocumentOptions
++    if (string.IsNullOrWhiteSpace(text))
++        yield break;
++
++    string jsonText = NormalizeLooseJsonForLenientParsing(text);
++
++    using JsonDocument document = JsonDocument.Parse(jsonText, new JsonDocumentOptions
+     {
+         AllowTrailingCommas = true,
+         CommentHandling = JsonCommentHandling.Skip
+@@ -854,6 +859,79 @@ static IEnumerable<LooseContentRecord> ExtractLooseJsonContentRecords(LooseFileInventoryRecord fileRecord)
+     }
+ }
+ 
++static string NormalizeLooseJsonForLenientParsing(string text)
++{
++    // Some DFU loose data files are accepted by their target mod even though they are
++    // not strict JSON. The common case seen in FlatReplacements is numeric region
++    // values with leading zeroes, e.g. [00, 01, 04]. System.Text.Json correctly
++    // rejects those, so normalize only numeric tokens outside strings.
++    var builder = new System.Text.StringBuilder(text.Length);
++    bool inString = false;
++    bool escaped = false;
++
++    for (int i = 0; i < text.Length; i++)
++    {
++        char c = text[i];
++
++        if (inString)
++        {
++            builder.Append(c);
++
++            if (escaped)
++            {
++                escaped = false;
++            }
++            else if (c == '\\')
++            {
++                escaped = true;
++            }
++            else if (c == '"')
++            {
++                inString = false;
++            }
++
++            continue;
++        }
++
++        if (c == '"')
++        {
++            inString = true;
++            builder.Append(c);
++            continue;
++        }
++
++        if (c == '-' && i + 2 < text.Length && text[i + 1] == '0' && char.IsDigit(text[i + 2]))
++        {
++            int digitStart = i + 1;
++            int digitEnd = digitStart;
++            while (digitEnd < text.Length && char.IsDigit(text[digitEnd]))
++                digitEnd++;
++
++            string digits = text.Substring(digitStart, digitEnd - digitStart).TrimStart('0');
++            builder.Append('-');
++            builder.Append(digits.Length == 0 ? "0" : digits);
++            i = digitEnd - 1;
++            continue;
++        }
++
++        if (c == '0' && i + 1 < text.Length && char.IsDigit(text[i + 1]))
++        {
++            int digitEnd = i;
++            while (digitEnd < text.Length && char.IsDigit(text[digitEnd]))
++                digitEnd++;
++
++            string digits = text.Substring(i, digitEnd - i).TrimStart('0');
++            builder.Append(digits.Length == 0 ? "0" : digits);
++            i = digitEnd - 1;
++            continue;
++        }
++
++        builder.Append(c);
++    }
++
++    return builder.ToString();
++}
++
+ static IEnumerable<(JsonElement Element, string JsonPath)> EnumerateJsonObjects(JsonElement element, string jsonPath, int depth = 0)
+ {
+     if (depth > 64)
