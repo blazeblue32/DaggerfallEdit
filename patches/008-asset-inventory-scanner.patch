@@ -1,0 +1,457 @@
+diff --git a/src/DaggerfallEdit.AssetStudio/AssetStudioAssetInventoryExtractor.cs b/src/DaggerfallEdit.AssetStudio/AssetStudioAssetInventoryExtractor.cs
+new file mode 100644
+index 0000000..9ba6e79
+--- /dev/null
++++ b/src/DaggerfallEdit.AssetStudio/AssetStudioAssetInventoryExtractor.cs
+@@ -0,0 +1,205 @@
++using System.Reflection;
++using DaggerfallEdit.Core;
++using AS = global::AssetStudio;
++
++namespace DaggerfallEdit.AssetStudio;
++
++public static class AssetStudioAssetInventoryExtractor
++{
++    public static IEnumerable<AssetInventoryRecord> ExtractAssets(string modName, string dfmodPath)
++    {
++        var manager = new AS.AssetsManager();
++
++        manager.LoadFiles(dfmodPath);
++
++        foreach (var assetsFile in manager.assetsFileList)
++        {
++            string? containerPath =
++                TryGetStringMember(assetsFile, "originalPath") ??
++                TryGetStringMember(assetsFile, "fullName") ??
++                TryGetStringMember(assetsFile, "fileName");
++
++            foreach (object obj in assetsFile.Objects)
++            {
++                string className = GetUnityClassName(obj);
++                long pathId = TryGetLongMember(obj, "m_PathID") ?? 0;
++                string? rawName = TryGetStringMember(obj, "m_Name");
++                bool hasStableName = !string.IsNullOrWhiteSpace(rawName);
++
++                string assetName = hasStableName
++                    ? rawName!.Trim()
++                    : $"{className}_{pathId}";
++
++                string semanticKind = ClassifySemanticKind(className, assetName);
++                string identityKey = BuildIdentityKey(className, assetName, semanticKind, hasStableName, pathId);
++
++                yield return new AssetInventoryRecord(
++                    ModName: modName,
++                    DfmodPath: dfmodPath,
++                    AssetName: assetName,
++                    ClassName: className,
++                    PathId: pathId,
++                    SemanticKind: semanticKind,
++                    IdentityKey: identityKey,
++                    ByteLength: TryGetKnownPayloadLength(obj, className),
++                    ContainerPath: containerPath);
++            }
++        }
++    }
++
++    private static string GetUnityClassName(object obj)
++    {
++        string typeName = obj.GetType().Name;
++
++        return string.IsNullOrWhiteSpace(typeName)
++            ? "Unknown"
++            : typeName;
++    }
++
++    private static string ClassifySemanticKind(string className, string assetName)
++    {
++        if (className.Equals("TextAsset", StringComparison.OrdinalIgnoreCase))
++        {
++            if (assetName.StartsWith("locationnew-", StringComparison.OrdinalIgnoreCase))
++                return "NewLocation";
++
++            if (LooksLikeExistingLocationAsset(assetName))
++                return "ExistingLocationOverride";
++
++            if (assetName.Contains("quest", StringComparison.OrdinalIgnoreCase))
++                return "QuestOrQuestText";
++
++            if (assetName.Contains("local", StringComparison.OrdinalIgnoreCase) ||
++                assetName.Contains("lang", StringComparison.OrdinalIgnoreCase))
++                return "LocalizationOrText";
++
++            return "TextAsset";
++        }
++
++        return className switch
++        {
++            "Texture2D" => "TextureReplacement",
++            "Sprite" => "SpriteReplacement",
++            "AudioClip" => "AudioReplacement",
++            "Mesh" => "MeshReplacement",
++            "Material" => "MaterialReplacement",
++            "Shader" => "ShaderReplacement",
++            "GameObject" => "PrefabOrGameObject",
++            "MonoBehaviour" => "MonoBehaviourData",
++            "MonoScript" => "ScriptReference",
++            "AnimationClip" => "AnimationReplacement",
++            "Animator" => "AnimatorData",
++            "AnimatorController" => "AnimatorControllerData",
++            "AssetBundle" => "AssetBundleMetadata",
++            _ => "UnityAsset"
++        };
++    }
++
++    private static bool LooksLikeExistingLocationAsset(string assetName)
++    {
++        if (!assetName.StartsWith("location-", StringComparison.OrdinalIgnoreCase))
++            return false;
++
++        string[] parts = assetName.Split('-');
++
++        return parts.Length >= 3 &&
++               int.TryParse(parts[1], out _) &&
++               int.TryParse(parts[2], out _);
++    }
++
++    private static string BuildIdentityKey(
++        string className,
++        string assetName,
++        string semanticKind,
++        bool hasStableName,
++        long pathId)
++    {
++        string normalizedClass = NormalizeIdentityPart(className);
++        string normalizedName = NormalizeIdentityPart(assetName);
++
++        if (!hasStableName)
++            normalizedName = $"<unnamed:{pathId}>";
++
++        return $"{normalizedClass}/{semanticKind}/{normalizedName}";
++    }
++
++    private static string NormalizeIdentityPart(string value)
++    {
++        return value.Trim().Replace('\\', '/').ToLowerInvariant();
++    }
++
++    private static long? TryGetKnownPayloadLength(object obj, string className)
++    {
++        if (className.Equals("TextAsset", StringComparison.OrdinalIgnoreCase) &&
++            TryGetByteArrayMember(obj, "m_Script") is { } scriptBytes)
++        {
++            return scriptBytes.LongLength;
++        }
++
++        if (className.Equals("Texture2D", StringComparison.OrdinalIgnoreCase) &&
++            TryGetByteArrayMember(obj, "image_data") is { } imageBytes)
++        {
++            return imageBytes.LongLength;
++        }
++
++        if (className.Equals("AudioClip", StringComparison.OrdinalIgnoreCase) &&
++            TryGetByteArrayMember(obj, "m_AudioData") is { } audioBytes)
++        {
++            return audioBytes.LongLength;
++        }
++
++        return null;
++    }
++
++    private static string? TryGetStringMember(object obj, string name)
++    {
++        object? value = TryGetMemberValue(obj, name);
++        return value as string;
++    }
++
++    private static long? TryGetLongMember(object obj, string name)
++    {
++        object? value = TryGetMemberValue(obj, name);
++
++        return value switch
++        {
++            long longValue => longValue,
++            int intValue => intValue,
++            uint uintValue => uintValue,
++            ulong ulongValue when ulongValue <= long.MaxValue => (long)ulongValue,
++            _ => null
++        };
++    }
++
++    private static byte[]? TryGetByteArrayMember(object obj, string name)
++    {
++        object? value = TryGetMemberValue(obj, name);
++        return value as byte[];
++    }
++
++    private static object? TryGetMemberValue(object obj, string name)
++    {
++        Type? type = obj.GetType();
++
++        while (type != null)
++        {
++            FieldInfo? field = type.GetField(
++                name,
++                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
++
++            if (field != null)
++                return field.GetValue(obj);
++
++            PropertyInfo? property = type.GetProperty(
++                name,
++                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
++
++            if (property != null && property.GetIndexParameters().Length == 0)
++                return property.GetValue(obj);
++
++            type = type.BaseType;
++        }
++
++        return null;
++    }
++}
+diff --git a/src/DaggerfallEdit.Cli/Program.cs b/src/DaggerfallEdit.Cli/Program.cs
+index 237f403..f74a792 100644
+--- a/src/DaggerfallEdit.Cli/Program.cs
++++ b/src/DaggerfallEdit.Cli/Program.cs
+@@ -26,6 +26,7 @@ string? outPath = null;
+ string cacheDir = ".dfedit-cache";
+ bool noCache = false;
+ bool rebuildCache = false;
++bool inventory = false;
+ 
+ for (int i = 2; i < args.Length; i++)
+ {
+@@ -76,6 +77,10 @@ for (int i = 2; i < args.Length; i++)
+ 	{
+ 		rebuildCache = true;
+ 	}
++    else if (args[i] == "--inventory")
++    {
++        inventory = true;
++    }
+ }
+ 
+ TextWriter originalOut = Console.Out;
+@@ -97,6 +102,24 @@ if (!string.IsNullOrWhiteSpace(outPath))
+ string cachePath = Path.Combine(cacheDir, "mapid-cache.json");
+ ScanCache? cache = noCache ? null : ScanCache.Load(cachePath);
+ 
++if (inventory)
++{
++    if (mode != "--mods")
++    {
++        Console.Error.WriteLine("Inventory mode currently supports --mods only.");
++        FinishOutput(outWriter, originalOut, outPath);
++        return 1;
++    }
++
++    List<AssetInventoryRecord> inventoryRecords = ScanDfmodInventory(root);
++
++    Console.WriteLine();
++    PrintAssetInventory(inventoryRecords);
++
++    FinishOutput(outWriter, originalOut, outPath);
++    return 0;
++}
++
+ List<MapIdRecord> records = mode switch
+ {
+     "--loose" => ScanLooseFiles(root),
+@@ -149,14 +172,7 @@ cache?.Save();
+ 
+ PrintConflicts(records, filterMapId.HasValue || filterLocationId.HasValue, minSeverity, allRecords);
+ 
+-if (outWriter != null)
+-{
+-    Console.Out.Flush();
+-    Console.SetOut(originalOut);
+-    outWriter.Dispose();
+-
+-    Console.WriteLine($"Report written to: {Path.GetFullPath(outPath!)}");
+-}
++FinishOutput(outWriter, originalOut, outPath);
+ 
+ return 0;
+ 
+@@ -199,6 +215,36 @@ static List<MapIdRecord> ScanLooseFiles(string root)
+     return records;
+ }
+ 
++static List<AssetInventoryRecord> ScanDfmodInventory(string root)
++{
++    var dfmods = Directory
++        .EnumerateFiles(root, "*.dfmod", SearchOption.AllDirectories)
++        .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
++        .ToList();
++
++    Console.WriteLine($"Inventory scanning .dfmod files under: {root}");
++    Console.WriteLine($"Found {dfmods.Count} .dfmod file(s).");
++
++    var records = new List<AssetInventoryRecord>();
++
++    foreach (string dfmod in dfmods)
++    {
++        string modName = GuessModName(root, dfmod);
++
++        try
++        {
++            records.AddRange(AssetStudioAssetInventoryExtractor.ExtractAssets(modName, dfmod));
++        }
++        catch (Exception ex)
++        {
++            Console.WriteLine($"WARN: Could not inventory .dfmod: {dfmod}");
++            Console.WriteLine($"      {ex.GetType().Name}: {ex.Message}");
++        }
++    }
++
++    return records;
++}
++
+ static List<MapIdRecord> ScanDfmods(string root, ScanCache? cache, bool rebuildCache)
+ {
+     var dfmods = Directory
+@@ -319,6 +365,98 @@ static List<MapIdRecord> LoadBaselineMapIds(string path)
+     return records;
+ }
+ 
++static void PrintAssetInventory(List<AssetInventoryRecord> records)
++{
++    Console.WriteLine("Asset inventory");
++    Console.WriteLine(new string('=', 80));
++    Console.WriteLine($"Assets found: {records.Count}");
++    Console.WriteLine($"Mods with assets: {records.Select(r => r.ModName).Distinct(StringComparer.OrdinalIgnoreCase).Count()}");
++    Console.WriteLine($"DFMod files with assets: {records.Select(r => r.DfmodPath).Distinct(StringComparer.OrdinalIgnoreCase).Count()}");
++    Console.WriteLine();
++
++    Console.WriteLine("Unity class counts:");
++    foreach (var group in records
++                 .GroupBy(r => r.ClassName, StringComparer.OrdinalIgnoreCase)
++                 .OrderByDescending(g => g.Count())
++                 .ThenBy(g => g.Key))
++    {
++        Console.WriteLine($"  {group.Key}: {group.Count()}");
++    }
++
++    Console.WriteLine();
++    Console.WriteLine("Semantic kind counts:");
++    foreach (var group in records
++                 .GroupBy(r => r.SemanticKind, StringComparer.OrdinalIgnoreCase)
++                 .OrderByDescending(g => g.Count())
++                 .ThenBy(g => g.Key))
++    {
++        Console.WriteLine($"  {group.Key}: {group.Count()}");
++    }
++
++    Console.WriteLine();
++    Console.WriteLine("Duplicate asset identities across mods/files:");
++
++    var duplicateGroups = records
++        .GroupBy(r => r.IdentityKey, StringComparer.OrdinalIgnoreCase)
++        .Select(g => new
++        {
++            IdentityKey = g.Key,
++            Records = g.ToList(),
++            SourceCount = g.Select(r => r.DfmodPath).Distinct(StringComparer.OrdinalIgnoreCase).Count(),
++            ModCount = g.Select(r => r.ModName).Distinct(StringComparer.OrdinalIgnoreCase).Count()
++        })
++        .Where(g => g.SourceCount > 1)
++        .OrderByDescending(g => g.ModCount)
++        .ThenByDescending(g => g.SourceCount)
++        .ThenBy(g => g.IdentityKey)
++        .ToList();
++
++    if (duplicateGroups.Count == 0)
++    {
++        Console.WriteLine("  None found.");
++        return;
++    }
++
++    Console.WriteLine($"  Found {duplicateGroups.Count} duplicate asset identity group(s).");
++    Console.WriteLine();
++
++    foreach (var group in duplicateGroups)
++    {
++        AssetInventoryRecord first = group.Records.First();
++
++        Console.WriteLine($"DUPLICATE: {group.IdentityKey}");
++        Console.WriteLine($"  Class: {first.ClassName}");
++        Console.WriteLine($"  Semantic Kind: {first.SemanticKind}");
++        Console.WriteLine($"  Mods: {group.ModCount}");
++        Console.WriteLine($"  DFMod files: {group.SourceCount}");
++
++        int i = 1;
++
++        foreach (AssetInventoryRecord record in group.Records
++                     .OrderBy(r => r.ModName)
++                     .ThenBy(r => r.DfmodPath)
++                     .ThenBy(r => r.AssetName)
++                     .ThenBy(r => r.PathId))
++        {
++            Console.WriteLine($"  {i}. Mod: {record.ModName}");
++            Console.WriteLine($"     DFMod/File: {record.DfmodPath}");
++            Console.WriteLine($"     Asset: {record.AssetName}");
++            Console.WriteLine($"     Class: {record.ClassName}");
++            Console.WriteLine($"     PathID: {record.PathId}");
++
++            if (record.ByteLength.HasValue)
++                Console.WriteLine($"     Payload Bytes: {record.ByteLength.Value}");
++
++            if (!string.IsNullOrWhiteSpace(record.ContainerPath))
++                Console.WriteLine($"     Container: {record.ContainerPath}");
++
++            i++;
++        }
++
++        Console.WriteLine(new string('-', 80));
++    }
++}
++
+ static void PrintConflicts(
+     List<MapIdRecord> records,
+     bool showSingleAssetGroups,
+@@ -682,6 +820,18 @@ static string GuessModName(string root, string filePath)
+     return Path.GetFileNameWithoutExtension(filePath);
+ }
+ 
++static void FinishOutput(StreamWriter? outWriter, TextWriter originalOut, string? outPath)
++{
++    if (outWriter == null)
++        return;
++
++    Console.Out.Flush();
++    Console.SetOut(originalOut);
++    outWriter.Dispose();
++
++    Console.WriteLine($"Report written to: {Path.GetFullPath(outPath!)}");
++}
++
+ static List<MapIdRecord> UnknownMode(string mode)
+ {
+     Console.Error.WriteLine($"Unknown mode: {mode}");
+@@ -695,6 +845,7 @@ static void PrintUsage()
+     Console.WriteLine("Usage:");
+     Console.WriteLine("  DaggerfallEdit.Cli --loose <folder>");
+     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder>");
++    Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --inventory --out <inventory-report.txt>");
+     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --filter-mapid <id>");
+     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --filter-locationid <id>");
+     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --baseline <mapids.txt>");
+diff --git a/src/DaggerfallEdit.Core/AssetInventoryRecord.cs b/src/DaggerfallEdit.Core/AssetInventoryRecord.cs
+new file mode 100644
+index 0000000..370d08f
+--- /dev/null
++++ b/src/DaggerfallEdit.Core/AssetInventoryRecord.cs
+@@ -0,0 +1,13 @@
++namespace DaggerfallEdit.Core;
++
++public sealed record AssetInventoryRecord(
++    string ModName,
++    string DfmodPath,
++    string AssetName,
++    string ClassName,
++    long PathId,
++    string SemanticKind,
++    string IdentityKey,
++    long? ByteLength,
++    string? ContainerPath
++);

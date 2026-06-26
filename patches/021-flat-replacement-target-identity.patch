@@ -1,0 +1,231 @@
+diff --git a/src/DaggerfallEdit.Cli/Program.cs b/src/DaggerfallEdit.Cli/Program.cs
+index 818a3bb..37daad8 100644
+--- a/src/DaggerfallEdit.Cli/Program.cs
++++ b/src/DaggerfallEdit.Cli/Program.cs
+@@ -835,7 +835,11 @@ static IEnumerable<LooseContentRecord> ExtractLooseJsonContentRecords(LooseFileI
+                 jsonPath,
+                 out string contentKind,
+                 out string contentIdentityKey,
+-                out string displayName))
++                out string displayName,
++                out string? targetName,
++                out string? replacementName,
++                out string? portraitName,
++                out string? ruleContext))
+         {
+             yield return new LooseContentRecord(
+                 SourceName: fileRecord.ModName,
+@@ -848,6 +852,10 @@ static IEnumerable<LooseContentRecord> ExtractLooseJsonContentRecords(LooseFileI
+                 ContentIdentityKey: contentIdentityKey,
+                 JsonPath: jsonPath,
+                 DisplayName: displayName,
++                TargetName: targetName,
++                ReplacementName: replacementName,
++                PortraitName: portraitName,
++                RuleContext: ruleContext,
+                 SourceByteLength: fileRecord.ByteLength,
+                 DuplicatePolicy: "Report: loose content record override",
+                 IsOverwrite: fileRecord.IsOverwrite,
+@@ -981,30 +989,43 @@ static bool TryBuildLooseJsonContentIdentity(
+     string jsonPath,
+     out string contentKind,
+     out string contentIdentityKey,
+-    out string displayName)
++    out string displayName,
++    out string? targetName,
++    out string? replacementName,
++    out string? portraitName,
++    out string? ruleContext)
+ {
+     contentKind = string.Empty;
+     contentIdentityKey = string.Empty;
+     displayName = string.Empty;
++    targetName = null;
++    replacementName = null;
++    portraitName = null;
++    ruleContext = null;
+ 
+     if (element.ValueKind != JsonValueKind.Object)
+         return false;
+ 
+     if (IsFlatReplacementPath(fileRecord.RelativePath))
+     {
+-        int? archive = GetJsonIntAny(element,
+-            "Archive", "archive", "TextureArchive", "textureArchive", "FlatArchive", "flatArchive", "ArchiveIndex", "archiveIndex", "archiveID", "ArchiveID");
+-        int? record = GetJsonIntAny(element,
+-            "Record", "record", "TextureRecord", "textureRecord", "FlatRecord", "flatRecord", "RecordIndex", "recordIndex", "index", "Index", "recordID", "RecordID");
+-        int? frame = GetJsonIntAny(element,
+-            "Frame", "frame", "TextureFrame", "textureFrame", "FlatFrame", "flatFrame", "FrameIndex", "frameIndex");
++        // Flat Replacer rule identity is the original flat being targeted. The
++        // replacement flat and talk-window portrait are useful metadata, but they
++        // should not be the primary override key.
++        int? targetArchive = GetJsonIntAny(element, "TextureArchive", "textureArchive");
++        int? targetRecord = GetJsonIntAny(element, "TextureRecord", "textureRecord");
++        int? targetFrame = GetJsonIntAny(element, "TextureFrame", "textureFrame", "Frame", "frame");
+ 
+-        if (archive.HasValue && record.HasValue)
++        if (targetArchive.HasValue && targetRecord.HasValue)
+         {
+-            string framePart = frame.HasValue ? $"-{frame.Value}" : "";
++            string framePart = targetFrame.HasValue ? $"-{targetFrame.Value}" : "";
+             contentKind = "FlatReplacementRecord";
+-            contentIdentityKey = $"loosecontent/flatreplacement/{archive.Value}_{record.Value}{framePart}";
+-            displayName = $"{archive.Value}_{record.Value}{framePart}";
++            contentIdentityKey = $"loosecontent/flatreplacement/target/{targetArchive.Value}_{targetRecord.Value}{framePart}";
++            displayName = $"target {targetArchive.Value}_{targetRecord.Value}{framePart}";
++            targetName = $"{targetArchive.Value}_{targetRecord.Value}{framePart}";
++
++            replacementName = BuildFlatReplacementReplacementName(element);
++            portraitName = BuildFlatReplacementPortraitName(element);
++            ruleContext = BuildFlatReplacementRuleContext(element);
+             return true;
+         }
+     }
+@@ -1029,6 +1050,112 @@ static bool IsFlatReplacementPath(string relativePath)
+            relativePath.Contains("flatreplacement", StringComparison.OrdinalIgnoreCase);
+ }
+ 
++static string? BuildFlatReplacementReplacementName(JsonElement element)
++{
++    string? flatTextureName = GetJsonScalarStringAny(element, "FlatTextureName", "flatTextureName");
++    if (!string.IsNullOrWhiteSpace(flatTextureName) &&
++        !flatTextureName.Trim().Equals("-1", StringComparison.OrdinalIgnoreCase))
++    {
++        return $"custom {flatTextureName.Trim()}";
++    }
++
++    int? replacementArchive = GetJsonIntAny(element, "ReplaceTextureArchive", "replaceTextureArchive");
++    int? replacementRecord = GetJsonIntAny(element, "ReplaceTextureRecord", "replaceTextureRecord");
++    int? replacementFrame = GetJsonIntAny(element, "ReplaceTextureFrame", "replaceTextureFrame");
++
++    if (replacementArchive.HasValue && replacementRecord.HasValue)
++    {
++        string framePart = replacementFrame.HasValue ? $"-{replacementFrame.Value}" : "";
++        return $"{replacementArchive.Value}_{replacementRecord.Value}{framePart}";
++    }
++
++    return null;
++}
++
++static string? BuildFlatReplacementPortraitName(JsonElement element)
++{
++    string? portrait = GetJsonScalarStringAny(element, "FlatPortrait", "flatPortrait");
++
++    if (string.IsNullOrWhiteSpace(portrait) || portrait.Trim().Equals("-1", StringComparison.OrdinalIgnoreCase))
++        return null;
++
++    return portrait.Trim();
++}
++
++static string? BuildFlatReplacementRuleContext(JsonElement element)
++{
++    var parts = new List<string>();
++
++    AddJsonScalarContextPart(parts, element, "Regions", "regions");
++    AddJsonScalarContextPart(parts, element, "LocationTypes", "locationTypes");
++    AddJsonScalarContextPart(parts, element, "FactionId", "factionId");
++    AddJsonScalarContextPart(parts, element, "BuildingType", "buildingType");
++    AddJsonScalarContextPart(parts, element, "SocialGroup", "socialGroup");
++    AddJsonScalarContextPart(parts, element, "NameBank", "nameBank");
++    AddJsonScalarContextPart(parts, element, "Race", "race");
++    AddJsonScalarContextPart(parts, element, "Gender", "gender");
++    AddJsonScalarContextPart(parts, element, "QualityMin", "qualityMin");
++    AddJsonScalarContextPart(parts, element, "QualityMax", "qualityMax");
++    AddJsonScalarContextPart(parts, element, "Priority", "priority");
++    AddJsonScalarContextPart(parts, element, "UseExactDimensions", "useExactDimensions");
++
++    return parts.Count == 0 ? null : string.Join("; ", parts);
++}
++
++static void AddJsonScalarContextPart(List<string> parts, JsonElement element, string canonicalName, string alternateName)
++{
++    if (!TryGetJsonPropertyAny(element, out JsonElement property, canonicalName, alternateName))
++        return;
++
++    string value = property.ValueKind switch
++    {
++        JsonValueKind.Array => FormatJsonScalarArray(property),
++        JsonValueKind.String => property.GetString() ?? string.Empty,
++        JsonValueKind.Number => property.GetRawText(),
++        JsonValueKind.True => "true",
++        JsonValueKind.False => "false",
++        JsonValueKind.Null => "null",
++        _ => property.GetRawText()
++    };
++
++    if (!string.IsNullOrWhiteSpace(value))
++        parts.Add($"{canonicalName}={value}");
++}
++
++static string FormatJsonScalarArray(JsonElement arrayElement)
++{
++    var values = new List<string>();
++
++    foreach (JsonElement item in arrayElement.EnumerateArray())
++    {
++        string value = item.ValueKind switch
++        {
++            JsonValueKind.String => item.GetString() ?? string.Empty,
++            JsonValueKind.Number => item.GetRawText(),
++            JsonValueKind.True => "true",
++            JsonValueKind.False => "false",
++            JsonValueKind.Null => "null",
++            _ => item.GetRawText()
++        };
++
++        values.Add(value);
++    }
++
++    return $"[{string.Join(", ", values)}]";
++}
++
++static bool TryGetJsonPropertyAny(JsonElement element, out JsonElement property, params string[] propertyNames)
++{
++    foreach (string propertyName in propertyNames)
++    {
++        if (element.TryGetProperty(propertyName, out property))
++            return true;
++    }
++
++    property = default;
++    return false;
++}
++
+ static string BuildLooseJsonContentDomain(string relativePath)
+ {
+     string normalized = NormalizeRelativePath(relativePath);
+@@ -1220,6 +1347,19 @@ static void PrintLooseContentInventory(
+             Console.WriteLine($"     File: {record.FilePath}");
+             Console.WriteLine($"     Content Kind: {record.ContentKind}");
+             Console.WriteLine($"     Content: {record.DisplayName}");
++
++            if (!string.IsNullOrWhiteSpace(record.TargetName))
++                Console.WriteLine($"     Target: {record.TargetName}");
++
++            if (!string.IsNullOrWhiteSpace(record.ReplacementName))
++                Console.WriteLine($"     Replacement: {record.ReplacementName}");
++
++            if (!string.IsNullOrWhiteSpace(record.PortraitName))
++                Console.WriteLine($"     Portrait: {record.PortraitName}");
++
++            if (!string.IsNullOrWhiteSpace(record.RuleContext))
++                Console.WriteLine($"     Rule Context: {record.RuleContext}");
++
+             Console.WriteLine($"     JSON Path: {record.JsonPath}");
+             Console.WriteLine($"     Duplicate Policy: {record.DuplicatePolicy}");
+ 
+diff --git a/src/DaggerfallEdit.Core/LooseContentRecord.cs b/src/DaggerfallEdit.Core/LooseContentRecord.cs
+index 91c32b6..8f61df3 100644
+--- a/src/DaggerfallEdit.Core/LooseContentRecord.cs
++++ b/src/DaggerfallEdit.Core/LooseContentRecord.cs
+@@ -11,6 +11,10 @@ public sealed record LooseContentRecord(
+     string ContentIdentityKey,
+     string JsonPath,
+     string DisplayName,
++    string? TargetName,
++    string? ReplacementName,
++    string? PortraitName,
++    string? RuleContext,
+     long SourceByteLength,
+     string DuplicatePolicy,
+     bool IsOverwrite,

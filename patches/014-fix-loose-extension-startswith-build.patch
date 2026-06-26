@@ -1,0 +1,12 @@
+diff --git a/src/DaggerfallEdit.Cli/Program.cs b/src/DaggerfallEdit.Cli/Program.cs
+--- a/src/DaggerfallEdit.Cli/Program.cs
++++ b/src/DaggerfallEdit.Cli/Program.cs
+@@ -917,7 +917,7 @@ static string NormalizeExtensionFilter(string extension)
+     if (extension.Length == 0)
+         return extension;
+ 
+-    return extension.StartsWith('.', StringComparison.OrdinalIgnoreCase)
++    return extension.StartsWith(".", StringComparison.OrdinalIgnoreCase)
+         ? extension.ToLowerInvariant()
+         : $".{extension.ToLowerInvariant()}";
+ }

@@ -1,0 +1,27 @@
+diff --git a/src/DaggerfallEdit.Core/LooseContentRecord.cs b/src/DaggerfallEdit.Core/LooseContentRecord.cs
+new file mode 100644
+index 0000000..63b6c7a
+--- /dev/null
++++ b/src/DaggerfallEdit.Core/LooseContentRecord.cs
+@@ -0,0 +1,21 @@
++namespace DaggerfallEdit.Core;
++
++public sealed record LooseContentRecord(
++    string SourceName,
++    string SourceFolderPath,
++    string FilePath,
++    string RelativePath,
++    string SourceFileKind,
++    string SourceExtension,
++    string ContentKind,
++    string ContentIdentityKey,
++    string JsonPath,
++    string DisplayName,
++    long SourceByteLength,
++    string DuplicatePolicy,
++    bool IsOverwrite,
++    string? Mo2ModName,
++    bool? Mo2Enabled,
++    int? Mo2ListIndex,
++    int? Mo2LineNumber
++);
