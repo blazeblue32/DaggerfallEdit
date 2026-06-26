@@ -28,6 +28,12 @@ bool noCache = false;
 bool rebuildCache = false;
 bool inventory = false;
 bool inventoryAllDuplicates = false;
+bool inventoryDetails = false;
+int inventoryMaxGroups = 50;
+int inventoryMaxRecordsPerGroup = 10;
+string? inventoryKindFilter = null;
+string? inventoryClassFilter = null;
+string? inventoryIdentityContainsFilter = null;
 
 for (int i = 2; i < args.Length; i++)
 {
@@ -86,6 +92,39 @@ for (int i = 2; i < args.Length; i++)
     {
         inventoryAllDuplicates = true;
     }
+    else if (args[i] == "--inventory-details")
+    {
+        inventoryDetails = true;
+    }
+    else if (args[i] == "--inventory-max-groups" &&
+        i + 1 < args.Length &&
+        int.TryParse(args[i + 1], out int parsedInventoryMaxGroups))
+    {
+        inventoryMaxGroups = Math.Max(0, parsedInventoryMaxGroups);
+        i++;
+    }
+    else if (args[i] == "--inventory-max-records" &&
+        i + 1 < args.Length &&
+        int.TryParse(args[i + 1], out int parsedInventoryMaxRecords))
+    {
+        inventoryMaxRecordsPerGroup = Math.Max(0, parsedInventoryMaxRecords);
+        i++;
+    }
+    else if (args[i] == "--inventory-kind" && i + 1 < args.Length)
+    {
+        inventoryKindFilter = args[i + 1];
+        i++;
+    }
+    else if (args[i] == "--inventory-class" && i + 1 < args.Length)
+    {
+        inventoryClassFilter = args[i + 1];
+        i++;
+    }
+    else if (args[i] == "--inventory-identity-contains" && i + 1 < args.Length)
+    {
+        inventoryIdentityContainsFilter = args[i + 1];
+        i++;
+    }
 }
 
 TextWriter originalOut = Console.Out;
@@ -119,7 +158,16 @@ if (inventory)
     List<AssetInventoryRecord> inventoryRecords = ScanDfmodInventory(root);
 
     Console.WriteLine();
-    PrintAssetInventory(inventoryRecords, inventoryAllDuplicates);
+    PrintAssetInventory(
+        inventoryRecords,
+        new InventoryReportOptions(
+            IncludeSuppressedDuplicateGroups: inventoryAllDuplicates,
+            PrintDuplicateDetails: inventoryDetails,
+            MaxDuplicateGroups: inventoryMaxGroups,
+            MaxRecordsPerDuplicateGroup: inventoryMaxRecordsPerGroup,
+            SemanticKindFilter: inventoryKindFilter,
+            ClassNameFilter: inventoryClassFilter,
+            IdentityContainsFilter: inventoryIdentityContainsFilter));
 
     FinishOutput(outWriter, originalOut, outPath);
     return 0;
@@ -370,17 +418,33 @@ static List<MapIdRecord> LoadBaselineMapIds(string path)
     return records;
 }
 
-static void PrintAssetInventory(List<AssetInventoryRecord> records, bool includeSuppressedDuplicateGroups)
+static void PrintAssetInventory(List<AssetInventoryRecord> records, InventoryReportOptions options)
 {
+    List<AssetInventoryRecord> reportRecords = ApplyInventoryFilters(records, options);
+
     Console.WriteLine("Asset inventory");
     Console.WriteLine(new string('=', 80));
     Console.WriteLine($"Assets found: {records.Count}");
-    Console.WriteLine($"Mods with assets: {records.Select(r => r.ModName).Distinct(StringComparer.OrdinalIgnoreCase).Count()}");
-    Console.WriteLine($"DFMod files with assets: {records.Select(r => r.DfmodPath).Distinct(StringComparer.OrdinalIgnoreCase).Count()}");
+
+    if (reportRecords.Count != records.Count)
+        Console.WriteLine($"Assets matching inventory filters: {reportRecords.Count}");
+
+    Console.WriteLine($"Mods with assets: {reportRecords.Select(r => r.ModName).Distinct(StringComparer.OrdinalIgnoreCase).Count()}");
+    Console.WriteLine($"DFMod files with assets: {reportRecords.Select(r => r.DfmodPath).Distinct(StringComparer.OrdinalIgnoreCase).Count()}");
+
+    if (!string.IsNullOrWhiteSpace(options.SemanticKindFilter))
+        Console.WriteLine($"Filter: Semantic kind = {options.SemanticKindFilter}");
+
+    if (!string.IsNullOrWhiteSpace(options.ClassNameFilter))
+        Console.WriteLine($"Filter: Unity class = {options.ClassNameFilter}");
+
+    if (!string.IsNullOrWhiteSpace(options.IdentityContainsFilter))
+        Console.WriteLine($"Filter: Identity contains = {options.IdentityContainsFilter}");
+
     Console.WriteLine();
 
     Console.WriteLine("Unity class counts:");
-    foreach (var group in records
+    foreach (var group in reportRecords
                  .GroupBy(r => r.ClassName, StringComparer.OrdinalIgnoreCase)
                  .OrderByDescending(g => g.Count())
                  .ThenBy(g => g.Key))
@@ -390,7 +454,7 @@ static void PrintAssetInventory(List<AssetInventoryRecord> records, bool include
 
     Console.WriteLine();
     Console.WriteLine("Semantic kind counts:");
-    foreach (var group in records
+    foreach (var group in reportRecords
                  .GroupBy(r => r.SemanticKind, StringComparer.OrdinalIgnoreCase)
                  .OrderByDescending(g => g.Count())
                  .ThenBy(g => g.Key))
@@ -400,7 +464,7 @@ static void PrintAssetInventory(List<AssetInventoryRecord> records, bool include
 
     Console.WriteLine();
     Console.WriteLine("Duplicate policy counts:");
-    foreach (var group in records
+    foreach (var group in reportRecords
                  .GroupBy(r => r.DuplicatePolicy, StringComparer.OrdinalIgnoreCase)
                  .OrderByDescending(g => g.Count())
                  .ThenBy(g => g.Key))
@@ -411,16 +475,14 @@ static void PrintAssetInventory(List<AssetInventoryRecord> records, bool include
     Console.WriteLine();
     Console.WriteLine("Potential override identity duplicates across mods/files:");
 
-    var allDuplicateGroups = records
+    var allDuplicateGroups = reportRecords
         .GroupBy(r => r.IdentityKey, StringComparer.OrdinalIgnoreCase)
-        .Select(g => new
-        {
-            IdentityKey = g.Key,
-            Records = g.ToList(),
-            SourceCount = g.Select(r => r.DfmodPath).Distinct(StringComparer.OrdinalIgnoreCase).Count(),
-            ModCount = g.Select(r => r.ModName).Distinct(StringComparer.OrdinalIgnoreCase).Count(),
-            IsReportable = g.Any(r => IsReportableInventoryDuplicate(r))
-        })
+        .Select(g => new InventoryDuplicateGroup(
+            IdentityKey: g.Key,
+            Records: g.ToList(),
+            SourceCount: g.Select(r => r.DfmodPath).Distinct(StringComparer.OrdinalIgnoreCase).Count(),
+            ModCount: g.Select(r => r.ModName).Distinct(StringComparer.OrdinalIgnoreCase).Count(),
+            IsReportable: g.Any(r => IsReportableInventoryDuplicate(r))))
         .Where(g => g.SourceCount > 1)
         .OrderByDescending(g => g.IsReportable)
         .ThenByDescending(g => g.ModCount)
@@ -429,7 +491,7 @@ static void PrintAssetInventory(List<AssetInventoryRecord> records, bool include
         .ToList();
 
     var duplicateGroups = allDuplicateGroups
-        .Where(g => includeSuppressedDuplicateGroups || g.IsReportable)
+        .Where(g => options.IncludeSuppressedDuplicateGroups || g.IsReportable)
         .ToList();
 
     int suppressedDuplicateGroupCount = allDuplicateGroups.Count - allDuplicateGroups.Count(g => g.IsReportable);
@@ -440,15 +502,39 @@ static void PrintAssetInventory(List<AssetInventoryRecord> records, bool include
         return;
     }
 
-    Console.WriteLine($"  Reported duplicate group(s): {duplicateGroups.Count}");
+    Console.WriteLine($"  Reportable duplicate group(s): {allDuplicateGroups.Count(g => g.IsReportable)}");
     Console.WriteLine($"  Suppressed noisy duplicate group(s): {suppressedDuplicateGroupCount}");
 
-    if (!includeSuppressedDuplicateGroups && suppressedDuplicateGroupCount > 0)
+    if (options.IncludeSuppressedDuplicateGroups)
+        Console.WriteLine($"  Groups selected for output: {duplicateGroups.Count} including suppressed groups");
+    else
+        Console.WriteLine($"  Groups selected for output: {duplicateGroups.Count}");
+
+    if (!options.IncludeSuppressedDuplicateGroups && suppressedDuplicateGroupCount > 0)
         Console.WriteLine("  Use --inventory-all-duplicates to include suppressed metadata/dependency/internal Unity groups.");
 
     Console.WriteLine();
 
-    foreach (var group in duplicateGroups)
+    PrintInventoryDuplicateOverview(duplicateGroups, options.MaxDuplicateGroups);
+
+    if (!options.PrintDuplicateDetails)
+    {
+        Console.WriteLine();
+        Console.WriteLine("Duplicate details are suppressed by default to keep inventory reports readable.");
+        Console.WriteLine("Use --inventory-details to print grouped mod entries.");
+        Console.WriteLine("Use --inventory-kind, --inventory-class, or --inventory-identity-contains to focus the report first.");
+        return;
+    }
+
+    Console.WriteLine();
+    Console.WriteLine($"Duplicate detail groups shown: {Math.Min(options.MaxDuplicateGroups, duplicateGroups.Count)} of {duplicateGroups.Count}");
+
+    if (options.MaxDuplicateGroups < duplicateGroups.Count)
+        Console.WriteLine($"Use --inventory-max-groups <n> to show more groups.");
+
+    Console.WriteLine();
+
+    foreach (InventoryDuplicateGroup group in duplicateGroups.Take(options.MaxDuplicateGroups))
     {
         AssetInventoryRecord first = group.Records.First();
         string label = group.IsReportable ? "POTENTIAL OVERRIDE" : "SUPPRESSED DUPLICATE";
@@ -461,12 +547,14 @@ static void PrintAssetInventory(List<AssetInventoryRecord> records, bool include
         Console.WriteLine($"  DFMod files: {group.SourceCount}");
 
         int i = 1;
+        var orderedRecords = group.Records
+            .OrderBy(r => r.ModName)
+            .ThenBy(r => r.DfmodPath)
+            .ThenBy(r => r.AssetName)
+            .ThenBy(r => r.PathId)
+            .ToList();
 
-        foreach (AssetInventoryRecord record in group.Records
-                     .OrderBy(r => r.ModName)
-                     .ThenBy(r => r.DfmodPath)
-                     .ThenBy(r => r.AssetName)
-                     .ThenBy(r => r.PathId))
+        foreach (AssetInventoryRecord record in orderedRecords.Take(options.MaxRecordsPerDuplicateGroup))
         {
             Console.WriteLine($"  {i}. Mod: {record.ModName}");
             Console.WriteLine($"     DFMod/File: {record.DfmodPath}");
@@ -484,7 +572,58 @@ static void PrintAssetInventory(List<AssetInventoryRecord> records, bool include
             i++;
         }
 
+        if (orderedRecords.Count > options.MaxRecordsPerDuplicateGroup)
+            Console.WriteLine($"  ... {orderedRecords.Count - options.MaxRecordsPerDuplicateGroup} more record(s) suppressed. Use --inventory-max-records <n> to show more per group.");
+
         Console.WriteLine(new string('-', 80));
+    }
+}
+
+static List<AssetInventoryRecord> ApplyInventoryFilters(
+    List<AssetInventoryRecord> records,
+    InventoryReportOptions options)
+{
+    IEnumerable<AssetInventoryRecord> query = records;
+
+    if (!string.IsNullOrWhiteSpace(options.SemanticKindFilter))
+    {
+        query = query.Where(r =>
+            r.SemanticKind.Equals(options.SemanticKindFilter, StringComparison.OrdinalIgnoreCase));
+    }
+
+    if (!string.IsNullOrWhiteSpace(options.ClassNameFilter))
+    {
+        query = query.Where(r =>
+            r.ClassName.Equals(options.ClassNameFilter, StringComparison.OrdinalIgnoreCase));
+    }
+
+    if (!string.IsNullOrWhiteSpace(options.IdentityContainsFilter))
+    {
+        query = query.Where(r =>
+            r.IdentityKey.Contains(options.IdentityContainsFilter, StringComparison.OrdinalIgnoreCase) ||
+            r.AssetName.Contains(options.IdentityContainsFilter, StringComparison.OrdinalIgnoreCase));
+    }
+
+    return query.ToList();
+}
+
+static void PrintInventoryDuplicateOverview(
+    List<InventoryDuplicateGroup> duplicateGroups,
+    int maxGroups)
+{
+    Console.WriteLine($"Top duplicate groups shown: {Math.Min(maxGroups, duplicateGroups.Count)} of {duplicateGroups.Count}");
+
+    if (maxGroups < duplicateGroups.Count)
+        Console.WriteLine($"Use --inventory-max-groups <n> to list more groups in the overview/details.");
+
+    Console.WriteLine();
+
+    foreach (InventoryDuplicateGroup group in duplicateGroups.Take(maxGroups))
+    {
+        AssetInventoryRecord first = group.Records.First();
+        string label = group.IsReportable ? "POTENTIAL" : "SUPPRESSED";
+
+        Console.WriteLine($"  {label,-10} {group.ModCount,3} mod(s), {group.SourceCount,3} file(s) | {first.ClassName} | {first.SemanticKind} | {group.IdentityKey}");
     }
 }
 
@@ -882,6 +1021,10 @@ static void PrintUsage()
     Console.WriteLine("  DaggerfallEdit.Cli --loose <folder>");
     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder>");
     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --inventory --out <inventory-report.txt>");
+    Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --inventory --inventory-details --inventory-max-groups 25 --inventory-max-records 5");
+    Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --inventory --inventory-kind ExistingLocationOverride");
+    Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --inventory --inventory-class Texture2D --inventory-details");
+    Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --inventory --inventory-identity-contains location-11-197");
     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --inventory --inventory-all-duplicates");
     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --filter-mapid <id>");
     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --filter-locationid <id>");
@@ -895,6 +1038,24 @@ static void PrintUsage()
 	Console.WriteLine("  DaggerfallEdit.Cli --mods <mods-root-folder> --arena2 <arena2-folder> --rebuild-cache");
 	Console.WriteLine("  DaggerfallEdit.Cli --mods <mods-root-folder> --arena2 <arena2-folder> --no-cache");
 }
+
+public sealed record InventoryReportOptions(
+    bool IncludeSuppressedDuplicateGroups,
+    bool PrintDuplicateDetails,
+    int MaxDuplicateGroups,
+    int MaxRecordsPerDuplicateGroup,
+    string? SemanticKindFilter,
+    string? ClassNameFilter,
+    string? IdentityContainsFilter
+);
+
+public sealed record InventoryDuplicateGroup(
+    string IdentityKey,
+    List<AssetInventoryRecord> Records,
+    int SourceCount,
+    int ModCount,
+    bool IsReportable
+);
 
 public sealed record AssetIdentitySummary(
     string MapIds,
