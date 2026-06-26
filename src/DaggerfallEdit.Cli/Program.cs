@@ -26,6 +26,8 @@ string? outPath = null;
 string cacheDir = ".dfedit-cache";
 bool noCache = false;
 bool rebuildCache = false;
+bool inventory = false;
+bool inventoryAllDuplicates = false;
 
 for (int i = 2; i < args.Length; i++)
 {
@@ -76,6 +78,14 @@ for (int i = 2; i < args.Length; i++)
 	{
 		rebuildCache = true;
 	}
+    else if (args[i] == "--inventory")
+    {
+        inventory = true;
+    }
+    else if (args[i] == "--inventory-all-duplicates")
+    {
+        inventoryAllDuplicates = true;
+    }
 }
 
 TextWriter originalOut = Console.Out;
@@ -96,6 +106,24 @@ if (!string.IsNullOrWhiteSpace(outPath))
 
 string cachePath = Path.Combine(cacheDir, "mapid-cache.json");
 ScanCache? cache = noCache ? null : ScanCache.Load(cachePath);
+
+if (inventory)
+{
+    if (mode != "--mods")
+    {
+        Console.Error.WriteLine("Inventory mode currently supports --mods only.");
+        FinishOutput(outWriter, originalOut, outPath);
+        return 1;
+    }
+
+    List<AssetInventoryRecord> inventoryRecords = ScanDfmodInventory(root);
+
+    Console.WriteLine();
+    PrintAssetInventory(inventoryRecords, inventoryAllDuplicates);
+
+    FinishOutput(outWriter, originalOut, outPath);
+    return 0;
+}
 
 List<MapIdRecord> records = mode switch
 {
@@ -149,14 +177,7 @@ cache?.Save();
 
 PrintConflicts(records, filterMapId.HasValue || filterLocationId.HasValue, minSeverity, allRecords);
 
-if (outWriter != null)
-{
-    Console.Out.Flush();
-    Console.SetOut(originalOut);
-    outWriter.Dispose();
-
-    Console.WriteLine($"Report written to: {Path.GetFullPath(outPath!)}");
-}
+FinishOutput(outWriter, originalOut, outPath);
 
 return 0;
 
@@ -192,6 +213,36 @@ static List<MapIdRecord> ScanLooseFiles(string root)
         catch (Exception ex)
         {
             Console.WriteLine($"WARN: Could not scan loose file: {file}");
+            Console.WriteLine($"      {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    return records;
+}
+
+static List<AssetInventoryRecord> ScanDfmodInventory(string root)
+{
+    var dfmods = Directory
+        .EnumerateFiles(root, "*.dfmod", SearchOption.AllDirectories)
+        .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+        .ToList();
+
+    Console.WriteLine($"Inventory scanning .dfmod files under: {root}");
+    Console.WriteLine($"Found {dfmods.Count} .dfmod file(s).");
+
+    var records = new List<AssetInventoryRecord>();
+
+    foreach (string dfmod in dfmods)
+    {
+        string modName = GuessModName(root, dfmod);
+
+        try
+        {
+            records.AddRange(AssetStudioAssetInventoryExtractor.ExtractAssets(modName, dfmod));
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"WARN: Could not inventory .dfmod: {dfmod}");
             Console.WriteLine($"      {ex.GetType().Name}: {ex.Message}");
         }
     }
@@ -317,6 +368,129 @@ static List<MapIdRecord> LoadBaselineMapIds(string path)
     }
 
     return records;
+}
+
+static void PrintAssetInventory(List<AssetInventoryRecord> records, bool includeSuppressedDuplicateGroups)
+{
+    Console.WriteLine("Asset inventory");
+    Console.WriteLine(new string('=', 80));
+    Console.WriteLine($"Assets found: {records.Count}");
+    Console.WriteLine($"Mods with assets: {records.Select(r => r.ModName).Distinct(StringComparer.OrdinalIgnoreCase).Count()}");
+    Console.WriteLine($"DFMod files with assets: {records.Select(r => r.DfmodPath).Distinct(StringComparer.OrdinalIgnoreCase).Count()}");
+    Console.WriteLine();
+
+    Console.WriteLine("Unity class counts:");
+    foreach (var group in records
+                 .GroupBy(r => r.ClassName, StringComparer.OrdinalIgnoreCase)
+                 .OrderByDescending(g => g.Count())
+                 .ThenBy(g => g.Key))
+    {
+        Console.WriteLine($"  {group.Key}: {group.Count()}");
+    }
+
+    Console.WriteLine();
+    Console.WriteLine("Semantic kind counts:");
+    foreach (var group in records
+                 .GroupBy(r => r.SemanticKind, StringComparer.OrdinalIgnoreCase)
+                 .OrderByDescending(g => g.Count())
+                 .ThenBy(g => g.Key))
+    {
+        Console.WriteLine($"  {group.Key}: {group.Count()}");
+    }
+
+    Console.WriteLine();
+    Console.WriteLine("Duplicate policy counts:");
+    foreach (var group in records
+                 .GroupBy(r => r.DuplicatePolicy, StringComparer.OrdinalIgnoreCase)
+                 .OrderByDescending(g => g.Count())
+                 .ThenBy(g => g.Key))
+    {
+        Console.WriteLine($"  {group.Key}: {group.Count()}");
+    }
+
+    Console.WriteLine();
+    Console.WriteLine("Potential override identity duplicates across mods/files:");
+
+    var allDuplicateGroups = records
+        .GroupBy(r => r.IdentityKey, StringComparer.OrdinalIgnoreCase)
+        .Select(g => new
+        {
+            IdentityKey = g.Key,
+            Records = g.ToList(),
+            SourceCount = g.Select(r => r.DfmodPath).Distinct(StringComparer.OrdinalIgnoreCase).Count(),
+            ModCount = g.Select(r => r.ModName).Distinct(StringComparer.OrdinalIgnoreCase).Count(),
+            IsReportable = g.Any(r => IsReportableInventoryDuplicate(r))
+        })
+        .Where(g => g.SourceCount > 1)
+        .OrderByDescending(g => g.IsReportable)
+        .ThenByDescending(g => g.ModCount)
+        .ThenByDescending(g => g.SourceCount)
+        .ThenBy(g => g.IdentityKey)
+        .ToList();
+
+    var duplicateGroups = allDuplicateGroups
+        .Where(g => includeSuppressedDuplicateGroups || g.IsReportable)
+        .ToList();
+
+    int suppressedDuplicateGroupCount = allDuplicateGroups.Count - allDuplicateGroups.Count(g => g.IsReportable);
+
+    if (allDuplicateGroups.Count == 0)
+    {
+        Console.WriteLine("  None found.");
+        return;
+    }
+
+    Console.WriteLine($"  Reported duplicate group(s): {duplicateGroups.Count}");
+    Console.WriteLine($"  Suppressed noisy duplicate group(s): {suppressedDuplicateGroupCount}");
+
+    if (!includeSuppressedDuplicateGroups && suppressedDuplicateGroupCount > 0)
+        Console.WriteLine("  Use --inventory-all-duplicates to include suppressed metadata/dependency/internal Unity groups.");
+
+    Console.WriteLine();
+
+    foreach (var group in duplicateGroups)
+    {
+        AssetInventoryRecord first = group.Records.First();
+        string label = group.IsReportable ? "POTENTIAL OVERRIDE" : "SUPPRESSED DUPLICATE";
+
+        Console.WriteLine($"{label}: {group.IdentityKey}");
+        Console.WriteLine($"  Class: {first.ClassName}");
+        Console.WriteLine($"  Semantic Kind: {first.SemanticKind}");
+        Console.WriteLine($"  Duplicate Policy: {first.DuplicatePolicy}");
+        Console.WriteLine($"  Mods: {group.ModCount}");
+        Console.WriteLine($"  DFMod files: {group.SourceCount}");
+
+        int i = 1;
+
+        foreach (AssetInventoryRecord record in group.Records
+                     .OrderBy(r => r.ModName)
+                     .ThenBy(r => r.DfmodPath)
+                     .ThenBy(r => r.AssetName)
+                     .ThenBy(r => r.PathId))
+        {
+            Console.WriteLine($"  {i}. Mod: {record.ModName}");
+            Console.WriteLine($"     DFMod/File: {record.DfmodPath}");
+            Console.WriteLine($"     Asset: {record.AssetName}");
+            Console.WriteLine($"     Class: {record.ClassName}");
+            Console.WriteLine($"     PathID: {record.PathId}");
+            Console.WriteLine($"     Duplicate Policy: {record.DuplicatePolicy}");
+
+            if (record.ByteLength.HasValue)
+                Console.WriteLine($"     Payload Bytes: {record.ByteLength.Value}");
+
+            if (!string.IsNullOrWhiteSpace(record.ContainerPath))
+                Console.WriteLine($"     Container: {record.ContainerPath}");
+
+            i++;
+        }
+
+        Console.WriteLine(new string('-', 80));
+    }
+}
+
+static bool IsReportableInventoryDuplicate(AssetInventoryRecord record)
+{
+    return record.DuplicatePolicy.StartsWith("Report:", StringComparison.OrdinalIgnoreCase);
 }
 
 static void PrintConflicts(
@@ -682,6 +856,18 @@ static string GuessModName(string root, string filePath)
     return Path.GetFileNameWithoutExtension(filePath);
 }
 
+static void FinishOutput(StreamWriter? outWriter, TextWriter originalOut, string? outPath)
+{
+    if (outWriter == null)
+        return;
+
+    Console.Out.Flush();
+    Console.SetOut(originalOut);
+    outWriter.Dispose();
+
+    Console.WriteLine($"Report written to: {Path.GetFullPath(outPath!)}");
+}
+
 static List<MapIdRecord> UnknownMode(string mode)
 {
     Console.Error.WriteLine($"Unknown mode: {mode}");
@@ -695,6 +881,8 @@ static void PrintUsage()
     Console.WriteLine("Usage:");
     Console.WriteLine("  DaggerfallEdit.Cli --loose <folder>");
     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder>");
+    Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --inventory --out <inventory-report.txt>");
+    Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --inventory --inventory-all-duplicates");
     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --filter-mapid <id>");
     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --filter-locationid <id>");
     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --baseline <mapids.txt>");
