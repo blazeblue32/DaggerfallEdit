@@ -1,0 +1,14 @@
+# Build outputs
+bin/
+obj/
+**/bin/
+**/obj/
+
+# DaggerfallEdit generated data
+.dfedit-cache/
+reports/
+
+# IDE/local files
+.vs/
+*.user
+*.suo

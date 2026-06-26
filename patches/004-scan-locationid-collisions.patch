@@ -1,0 +1,480 @@
+diff --git a/src/DaggerfallEdit.Cli/Program.cs b/src/DaggerfallEdit.Cli/Program.cs
+index 0e03cbb..02afa70 100644
+--- a/src/DaggerfallEdit.Cli/Program.cs
++++ b/src/DaggerfallEdit.Cli/Program.cs
+@@ -18,6 +18,7 @@ if (!Directory.Exists(root))
+ }
+ 
+ int? filterMapId = null;
++int? filterLocationId = null;
+ string? baselinePath = null;
+ string? arena2Path = null;
+ string minSeverity = "info";
+@@ -35,6 +36,13 @@ for (int i = 2; i < args.Length; i++)
+         filterMapId = parsed;
+         i++;
+     }
++    else if (args[i] == "--filter-locationid" &&
++        i + 1 < args.Length &&
++        int.TryParse(args[i + 1], out int parsedLocationId))
++    {
++        filterLocationId = parsedLocationId;
++        i++;
++    }
+     else if (args[i] == "--baseline" && i + 1 < args.Length)
+     {
+         baselinePath = args[i + 1];
+@@ -118,17 +126,26 @@ if (!string.IsNullOrWhiteSpace(arena2Path))
+ if (filterMapId.HasValue)
+ {
+     records = records
+-        .Where(r => r.MapId == filterMapId.Value)
++        .Where(r => r.MapId == filterMapId.Value && GetCollisionKeyKind(r) == "MapId")
+         .ToList();
+ 
+     Console.WriteLine($"Applied filter: MapId {filterMapId.Value}");
+ }
+ 
++if (filterLocationId.HasValue)
++{
++    records = records
++        .Where(r => r.MapId == filterLocationId.Value && GetCollisionKeyKind(r) == "LocationId")
++        .ToList();
++
++    Console.WriteLine($"Applied filter: LocationId {filterLocationId.Value}");
++}
++
+ Console.WriteLine();
+ 
+ cache?.Save();
+ 
+-PrintConflicts(records, filterMapId.HasValue, minSeverity);
++PrintConflicts(records, filterMapId.HasValue || filterLocationId.HasValue, minSeverity);
+ 
+ if (outWriter != null)
+ {
+@@ -303,8 +320,9 @@ static List<MapIdRecord> LoadBaselineMapIds(string path)
+ static void PrintConflicts(List<MapIdRecord> records, bool showSingleAssetGroups, string minSeverity)
+ {
+     var groups = records
+-        .GroupBy(r => r.MapId)
+-        .OrderBy(g => g.Key)
++        .GroupBy(r => new CollisionKey(GetCollisionKeyKind(r), r.MapId))
++        .OrderBy(g => SortCollisionKeyKind(g.Key.Kind))
++        .ThenBy(g => g.Key.Value)
+         .ToList();
+ 
+     int criticalCount = 0;
+@@ -343,7 +361,9 @@ static void PrintConflicts(List<MapIdRecord> records, bool showSingleAssetGroups
+ 
+         bool isInterAsset = uniqueAssets.Count > 1;
+ 
+-		ConflictClassification classification = ClassifyConflict(uniqueAssets.Select(e => e.Record).ToList());
++        string keyKind = group.Key.Kind;
++        int keyValue = group.Key.Value;
++		ConflictClassification classification = ClassifyConflict(uniqueAssets.Select(e => e.Record).ToList(), keyKind);
+ 
+ 		if (!isInterAsset && !showSingleAssetGroups)
+ 			continue;
+@@ -356,7 +376,7 @@ static void PrintConflicts(List<MapIdRecord> records, bool showSingleAssetGroups
+         if (!isInterAsset)
+         {
+             infoCount++;
+-            Console.WriteLine($"INFO: MapId {group.Key}");
++            Console.WriteLine($"INFO: {keyKind} {keyValue}");
+             Console.WriteLine("  Only found inside one asset. Multiple JSON paths inside the same asset are not a conflict.");
+         }
+         else
+@@ -376,18 +396,22 @@ static void PrintConflicts(List<MapIdRecord> records, bool showSingleAssetGroups
+                     break;
+             }
+ 
+-            Console.WriteLine($"{classification.Severity}: MapId {group.Key}");
++            Console.WriteLine($"{classification.Severity}: {keyKind} {keyValue}");
+             Console.WriteLine($"  {classification.Title}");
+             Console.WriteLine($"  {classification.Explanation}");
+         }
+ 
+         MapIdRecord firstRecord = group.First();
+ 
+-        if (firstRecord.X.HasValue && firstRecord.Y.HasValue)
++        if (keyKind == "MapId" && firstRecord.X.HasValue && firstRecord.Y.HasValue)
+         {
+             Console.WriteLine($"  Pixel: X={firstRecord.X}, Y={firstRecord.Y}");
+             Console.WriteLine($"  Derived DFU position: Longitude={firstRecord.Longitude}, Latitude={firstRecord.Latitude}");
+         }
++        else if (keyKind == "LocationId")
++        {
++            Console.WriteLine("  LocationId identity record. DFU also indexes these when enumerating maps.");
++        }
+         else
+         {
+             Console.WriteLine("  Location MapId record, not a derived map-pixel coordinate.");
+@@ -430,13 +454,61 @@ static void PrintConflicts(List<MapIdRecord> records, bool showSingleAssetGroups
+     Console.WriteLine($"  Info:     {infoCount}");
+ }
+ 
+-static ConflictClassification ClassifyConflict(List<MapIdRecord> records)
++static ConflictClassification ClassifyConflict(List<MapIdRecord> records, string keyKind)
+ {
+     int newLocationCount = records.Count(r => r.AssetKind == "NewLocation");
+     bool hasNewLocation = newLocationCount > 0;
+     bool hasBaseline = records.Any(r => r.AssetKind == "Baseline");
+     bool hasExistingOverride = records.Any(r => r.AssetKind == "ExistingLocationOverride");
+ 
++    if (keyKind == "LocationId")
++    {
++        if (hasNewLocation && hasBaseline)
++        {
++            return new ConflictClassification(
++                Severity: "CRITICAL",
++                Title: "Confirmed new-location collision with baseline/vanilla LocationId.",
++                Explanation: "A locationnew-* asset is using a LocationId that is present in the baseline. DFU stores LocationId-to-MapId links while enumerating maps, so this can trigger the same startup failure even when the logged value is the new location's MapId.");
++        }
++
++        if (newLocationCount > 1)
++        {
++            return new ConflictClassification(
++                Severity: "CRITICAL",
++                Title: "New location LocationId collision.",
++                Explanation: "Multiple locationnew-* assets share the same LocationId. New locations should have unique LocationIds as well as unique map-pixel MapIds.");
++        }
++
++        if (hasNewLocation)
++        {
++            return new ConflictClassification(
++                Severity: "WARNING",
++                Title: "New location shares LocationId with another asset.",
++                Explanation: "The scanner found a shared LocationId involving a locationnew-* asset, but there is no baseline record in this group to prove it is a vanilla collision.");
++        }
++
++        if (hasBaseline && hasExistingOverride)
++        {
++            return new ConflictClassification(
++                Severity: "INFO",
++                Title: "Existing location override overlaps baseline LocationId.",
++                Explanation: "This usually means a mod is intentionally overriding an existing vanilla location. This is normal overwrite behavior.");
++        }
++
++        if (hasExistingOverride)
++        {
++            return new ConflictClassification(
++                Severity: "WARNING",
++                Title: "Multiple existing-location overrides share the same LocationId.",
++                Explanation: "This is probably a normal overwrite-style conflict between mods editing the same existing location, not a new-location startup collision.");
++        }
++
++        return new ConflictClassification(
++            Severity: "WARNING",
++            Title: "Unclassified LocationId overlap.",
++            Explanation: "The scanner found the same LocationId in multiple assets, but could not classify the asset names well enough to determine whether this is dangerous.");
++    }
++
+     if (hasNewLocation && hasBaseline)
+     {
+         return new ConflictClassification(
+@@ -491,6 +563,23 @@ static ConflictClassification ClassifyConflict(List<MapIdRecord> records)
+         Explanation: "The scanner found the same MapId in multiple assets, but could not classify the asset names well enough to determine whether this is dangerous.");
+ }
+ 
++static string GetCollisionKeyKind(MapIdRecord record)
++{
++    return record.Source.Contains("LocationId", StringComparison.OrdinalIgnoreCase)
++        ? "LocationId"
++        : "MapId";
++}
++
++static int SortCollisionKeyKind(string keyKind)
++{
++    return keyKind switch
++    {
++        "MapId" => 0,
++        "LocationId" => 1,
++        _ => 2
++    };
++}
++
+ static bool ShouldIncludeSeverity(string severity, string minSeverity)
+ {
+     int severityRank = SeverityRank(severity);
+@@ -548,6 +637,7 @@ static void PrintUsage()
+     Console.WriteLine("  DaggerfallEdit.Cli --loose <folder>");
+     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder>");
+     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --filter-mapid <id>");
++    Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --filter-locationid <id>");
+     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --baseline <mapids.txt>");
+     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --baseline <mapids.txt> --filter-mapid <id>");
+ 	Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --min-severity critical");
+@@ -559,6 +649,11 @@ static void PrintUsage()
+ 	Console.WriteLine("  DaggerfallEdit.Cli --mods <mods-root-folder> --arena2 <arena2-folder> --no-cache");
+ }
+ 
++public sealed record CollisionKey(
++    string Kind,
++    int Value
++);
++
+ public sealed record ConflictClassification(
+     string Severity,
+     string Title,
+diff --git a/src/DaggerfallEdit.Core/MapIdScanner.cs b/src/DaggerfallEdit.Core/MapIdScanner.cs
+index fc4f041..dcd275e 100644
+--- a/src/DaggerfallEdit.Core/MapIdScanner.cs
++++ b/src/DaggerfallEdit.Core/MapIdScanner.cs
+@@ -5,6 +5,8 @@ namespace DaggerfallEdit.Core;
+ 
+ public static class MapIdScanner
+ {
++    private const int CollisionMapIdMask = 0x000fffff;
++
+     public static IEnumerable<MapIdRecord> ExtractMapIds(TextAssetInfo asset)
+     {
+         if (string.IsNullOrWhiteSpace(asset.Text))
+@@ -61,6 +63,11 @@ public static class MapIdScanner
+                 int? latitude = TryGetIntProperty(element, "Latitude")
+                              ?? TryGetIntProperty(element, "latitude");
+ 
++                int? locationId = TryGetIntProperty(element, "LocationId")
++                               ?? TryGetIntProperty(element, "locationId")
++                               ?? TryGetIntProperty(element, "LocationID")
++                               ?? TryGetIntProperty(element, "locationID");
++
+                 string? recordName = TryGetStringProperty(element, "Name")
+                                   ?? TryGetStringProperty(element, "name")
+                                   ?? TryGetStringProperty(element, "LocationName")
+@@ -69,6 +76,18 @@ public static class MapIdScanner
+                 if (mapId.HasValue)
+                 {
+                     yield return FromLocationMapId(asset, mapId.Value, path, recordName, "MapId field");
++
++                    int collisionMapId = mapId.Value & CollisionMapIdMask;
++
++                    if (collisionMapId != mapId.Value)
++                    {
++                        yield return FromLocationMapId(
++                            asset,
++                            collisionMapId,
++                            path,
++                            recordName,
++                            $"MapId lower-20 collision key from raw MapId {mapId.Value}");
++                    }
+                 }
+                 else if (longitude.HasValue && latitude.HasValue)
+                 {
+@@ -84,6 +103,16 @@ public static class MapIdScanner
+                         "Longitude/Latitude derived");
+                 }
+ 
++                if (locationId.HasValue && locationId.Value > 0 && IsLocationIdentityPath(path))
++                {
++                    yield return FromLocationId(
++                        asset,
++                        locationId.Value,
++                        path,
++                        recordName,
++                        "LocationId field");
++                }
++
+                 foreach (JsonProperty property in element.EnumerateObject())
+                 {
+                     string childPath = path + "." + property.Name;
+@@ -182,6 +211,28 @@ public static class MapIdScanner
+             Source: source);
+     }
+ 
++    private static MapIdRecord FromLocationId(
++        TextAssetInfo asset,
++        int locationId,
++        string path,
++        string? recordName,
++        string source)
++    {
++        return new MapIdRecord(
++            MapId: locationId,
++            X: null,
++            Y: null,
++            Longitude: null,
++            Latitude: null,
++            ModName: asset.ModName,
++            DfmodPath: asset.DfmodPath,
++            AssetName: asset.AssetName,
++            JsonPath: path,
++            RecordName: recordName,
++            AssetKind: ClassifyAssetKind(asset.AssetName),
++            Source: source);
++    }
++
+     private static MapIdRecord FromWorldCoordinates(
+         TextAssetInfo asset,
+         int mapId,
+@@ -217,6 +268,12 @@ public static class MapIdScanner
+         return y * 1000 + x;
+     }
+ 
++    private static bool IsLocationIdentityPath(string path)
++    {
++        return path.EndsWith(".RecordElement.Header", StringComparison.OrdinalIgnoreCase) ||
++               path.EndsWith(".MapTableData", StringComparison.OrdinalIgnoreCase);
++    }
++
+     private static string ClassifyAssetKind(string assetName)
+     {
+         if (assetName.StartsWith("locationnew-", StringComparison.OrdinalIgnoreCase))
+diff --git a/src/DaggerfallEdit.Core/ScanCache.cs b/src/DaggerfallEdit.Core/ScanCache.cs
+index 1f66170..a01b53f 100644
+--- a/src/DaggerfallEdit.Core/ScanCache.cs
++++ b/src/DaggerfallEdit.Core/ScanCache.cs
+@@ -16,12 +16,14 @@ public sealed record CachedMapIdScan(
+ 
+ public sealed class ScanCacheData
+ {
+-    public int SchemaVersion { get; set; } = 1;
++    public int SchemaVersion { get; set; } = ScanCache.CurrentSchemaVersion;
+     public List<CachedMapIdScan> Entries { get; set; } = new();
+ }
+ 
+ public sealed class ScanCache
+ {
++    public const int CurrentSchemaVersion = 2;
++
+     private readonly string cachePath;
+     private readonly ScanCacheData data;
+ 
+@@ -46,7 +48,7 @@ public sealed class ScanCache
+                         PropertyNameCaseInsensitive = true
+                     });
+ 
+-                if (loaded != null)
++                if (loaded != null && loaded.SchemaVersion == CurrentSchemaVersion)
+                     return new ScanCache(cachePath, loaded);
+             }
+         }
+diff --git a/src/DaggerfallEdit.Vanilla/MapsBsaBaselineExtractor.cs b/src/DaggerfallEdit.Vanilla/MapsBsaBaselineExtractor.cs
+index fe43190..29f36db 100644
+--- a/src/DaggerfallEdit.Vanilla/MapsBsaBaselineExtractor.cs
++++ b/src/DaggerfallEdit.Vanilla/MapsBsaBaselineExtractor.cs
+@@ -67,7 +67,7 @@ public static class MapsBsaBaselineExtractor
+ 
+             List<string> mapNames = ReadMapNames(mapNamesBytes.Span, mapNamesRecord);
+             List<MapTableEntry> mapTable = ReadMapTable(mapTableBytes.Span, mapNames.Count, mapTableRecord);
+-            List<int?> exteriorMapIds = ReadMapPItemExteriorMapIds(mapPItemBytes.Span, mapNames.Count, mapPItemRecord);
++            List<MapPItemIdentity?> mapPItemIdentities = ReadMapPItemIdentities(mapPItemBytes.Span, mapNames.Count, mapPItemRecord);
+             string regionName = GetRegionName(regionIndex);
+ 
+             for (int locationIndex = 0; locationIndex < mapTable.Count; locationIndex++)
+@@ -97,9 +97,9 @@ public static class MapsBsaBaselineExtractor
+                     AssetKind: "Baseline",
+                     Source: "Vanilla MAPS.BSA MapTable collision key"));
+ 
+-                if (locationIndex < exteriorMapIds.Count && exteriorMapIds[locationIndex].HasValue)
++                if (locationIndex < mapPItemIdentities.Count && mapPItemIdentities[locationIndex] is MapPItemIdentity identity)
+                 {
+-                    int exteriorMapId = exteriorMapIds[locationIndex]!.Value;
++                    int exteriorMapId = identity.ExteriorMapId;
+                     int exteriorX = exteriorMapId % 1000;
+                     int exteriorY = (exteriorMapId - exteriorX) / 1000;
+ 
+@@ -116,6 +116,23 @@ public static class MapsBsaBaselineExtractor
+                         RecordName: normalizedLocationName,
+                         AssetKind: "Baseline",
+                         Source: "Vanilla MAPS.BSA ExteriorData MapId"));
++
++                    if (identity.LocationId > 0)
++                    {
++                        records.Add(new MapIdRecord(
++                            MapId: identity.LocationId,
++                            X: null,
++                            Y: null,
++                            Longitude: entry.Longitude,
++                            Latitude: entry.Latitude,
++                            ModName: "[Vanilla MAPS.BSA]",
++                            DfmodPath: mapsPath,
++                            AssetName: assetName,
++                            JsonPath: $"{regionName}[{regionIndex}].{mapPItemRecord}[{locationIndex}].Exterior.RecordElement.Header.LocationId",
++                            RecordName: normalizedLocationName,
++                            AssetKind: "Baseline",
++                            Source: "Vanilla MAPS.BSA LocationId"));
++                    }
+                 }
+             }
+         }
+@@ -194,14 +211,14 @@ public static class MapsBsaBaselineExtractor
+     }
+ 
+ 
+-    private static List<int?> ReadMapPItemExteriorMapIds(ReadOnlySpan<byte> bytes, int locationCount, string recordName)
++    private static List<MapPItemIdentity?> ReadMapPItemIdentities(ReadOnlySpan<byte> bytes, int locationCount, string recordName)
+     {
+         int offsetTableLength = checked(locationCount * MapPItemOffsetLength);
+ 
+         if (bytes.Length < offsetTableLength)
+             throw new InvalidDataException($"{recordName} is too small for {locationCount} exterior offset(s).");
+ 
+-        var mapIds = new List<int?>(locationCount);
++        var identities = new List<MapPItemIdentity?>(locationCount);
+ 
+         for (int i = 0; i < locationCount; i++)
+         {
+@@ -212,23 +229,36 @@ public static class MapsBsaBaselineExtractor
+ 
+             if (locationOffset < offsetTableLength || locationOffset + 4 > bytes.Length)
+             {
+-                mapIds.Add(null);
++                identities.Add(null);
+                 continue;
+             }
+ 
+-            int? exteriorMapId = TryReadExteriorDataMapId(bytes, checked((int)locationOffset));
+-            mapIds.Add(exteriorMapId);
++            MapPItemIdentity? identity = TryReadMapPItemIdentity(bytes, checked((int)locationOffset));
++            identities.Add(identity);
+         }
+ 
+-        return mapIds;
++        return identities;
+     }
+ 
+-    private static int? TryReadExteriorDataMapId(ReadOnlySpan<byte> bytes, int locationOffset)
++    private static MapPItemIdentity? TryReadMapPItemIdentity(ReadOnlySpan<byte> bytes, int locationOffset)
+     {
+         if (locationOffset + 4 > bytes.Length)
+             return null;
+ 
+         uint doorCount = BinaryPrimitives.ReadUInt32LittleEndian(bytes.Slice(locationOffset, 4));
++
++        long locationIdOffset =
++            (long)locationOffset +
++            4 +
++            doorCount * LocationDoorLength +
++            33;
++
++        if (locationIdOffset + 2 > bytes.Length)
++            return null;
++
++        int locationId = BinaryPrimitives.ReadUInt16LittleEndian(
++            bytes.Slice(checked((int)locationIdOffset), 2));
++
+         long afterLocationRecordElement =
+             (long)locationOffset +
+             4 +
+@@ -254,7 +284,9 @@ public static class MapsBsaBaselineExtractor
+         int exteriorMapId = BinaryPrimitives.ReadInt32LittleEndian(
+             bytes.Slice(checked((int)mapIdOffset), 4));
+ 
+-        return exteriorMapId & CollisionMapIdMask;
++        return new MapPItemIdentity(
++            ExteriorMapId: exteriorMapId & CollisionMapIdMask,
++            LocationId: locationId);
+     }
+ 
+     private static string GetRegionName(int regionIndex)
+@@ -281,4 +313,9 @@ public static class MapsBsaBaselineExtractor
+         int Longitude,
+         int Latitude
+     );
++
++    private sealed record MapPItemIdentity(
++        int ExteriorMapId,
++        int LocationId
++    );
+ }

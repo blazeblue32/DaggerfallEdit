@@ -18,6 +18,7 @@ if (!Directory.Exists(root))
 }
 
 int? filterMapId = null;
+int? filterLocationId = null;
 string? baselinePath = null;
 string? arena2Path = null;
 string minSeverity = "info";
@@ -33,6 +34,13 @@ for (int i = 2; i < args.Length; i++)
         int.TryParse(args[i + 1], out int parsed))
     {
         filterMapId = parsed;
+        i++;
+    }
+    else if (args[i] == "--filter-locationid" &&
+        i + 1 < args.Length &&
+        int.TryParse(args[i + 1], out int parsedLocationId))
+    {
+        filterLocationId = parsedLocationId;
         i++;
     }
     else if (args[i] == "--baseline" && i + 1 < args.Length)
@@ -115,20 +123,31 @@ if (!string.IsNullOrWhiteSpace(arena2Path))
     Console.WriteLine($"Loaded {vanillaRecords.Count} vanilla MapId record(s) from MAPS.BSA.");
 }
 
+List<MapIdRecord> allRecords = records.ToList();
+
 if (filterMapId.HasValue)
 {
     records = records
-        .Where(r => r.MapId == filterMapId.Value)
+        .Where(r => r.MapId == filterMapId.Value && GetCollisionKeyKind(r) == "MapId")
         .ToList();
 
     Console.WriteLine($"Applied filter: MapId {filterMapId.Value}");
+}
+
+if (filterLocationId.HasValue)
+{
+    records = records
+        .Where(r => r.MapId == filterLocationId.Value && GetCollisionKeyKind(r) == "LocationId")
+        .ToList();
+
+    Console.WriteLine($"Applied filter: LocationId {filterLocationId.Value}");
 }
 
 Console.WriteLine();
 
 cache?.Save();
 
-PrintConflicts(records, filterMapId.HasValue, minSeverity);
+PrintConflicts(records, filterMapId.HasValue || filterLocationId.HasValue, minSeverity, allRecords);
 
 if (outWriter != null)
 {
@@ -300,11 +319,20 @@ static List<MapIdRecord> LoadBaselineMapIds(string path)
     return records;
 }
 
-static void PrintConflicts(List<MapIdRecord> records, bool showSingleAssetGroups, string minSeverity)
+static void PrintConflicts(
+    List<MapIdRecord> records,
+    bool showSingleAssetGroups,
+    string minSeverity,
+    List<MapIdRecord>? contextRecords = null)
 {
+    contextRecords ??= records;
+
+    Dictionary<string, AssetIdentitySummary> identitySummariesByAsset = BuildIdentitySummaryLookup(contextRecords);
+
     var groups = records
-        .GroupBy(r => r.MapId)
-        .OrderBy(g => g.Key)
+        .GroupBy(r => new CollisionKey(GetCollisionKeyKind(r), r.MapId))
+        .OrderBy(g => SortCollisionKeyKind(g.Key.Kind))
+        .ThenBy(g => g.Key.Value)
         .ToList();
 
     int criticalCount = 0;
@@ -314,7 +342,7 @@ static void PrintConflicts(List<MapIdRecord> records, bool showSingleAssetGroups
     foreach (var group in groups)
     {
         var uniqueAssets = group
-            .GroupBy(r => $"{r.ModName}|{r.DfmodPath}|{r.AssetName}", StringComparer.OrdinalIgnoreCase)
+            .GroupBy(GetAssetKey, StringComparer.OrdinalIgnoreCase)
             .Select(g =>
             {
                 MapIdRecord first = g.First();
@@ -343,7 +371,9 @@ static void PrintConflicts(List<MapIdRecord> records, bool showSingleAssetGroups
 
         bool isInterAsset = uniqueAssets.Count > 1;
 
-		ConflictClassification classification = ClassifyConflict(uniqueAssets.Select(e => e.Record).ToList());
+        string keyKind = group.Key.Kind;
+        int keyValue = group.Key.Value;
+		ConflictClassification classification = ClassifyConflict(uniqueAssets.Select(e => e.Record).ToList(), keyKind);
 
 		if (!isInterAsset && !showSingleAssetGroups)
 			continue;
@@ -356,7 +386,7 @@ static void PrintConflicts(List<MapIdRecord> records, bool showSingleAssetGroups
         if (!isInterAsset)
         {
             infoCount++;
-            Console.WriteLine($"INFO: MapId {group.Key}");
+            Console.WriteLine($"INFO: {keyKind} {keyValue}");
             Console.WriteLine("  Only found inside one asset. Multiple JSON paths inside the same asset are not a conflict.");
         }
         else
@@ -376,17 +406,22 @@ static void PrintConflicts(List<MapIdRecord> records, bool showSingleAssetGroups
                     break;
             }
 
-            Console.WriteLine($"{classification.Severity}: MapId {group.Key}");
+            Console.WriteLine($"{classification.Severity}: {keyKind} {keyValue}");
             Console.WriteLine($"  {classification.Title}");
             Console.WriteLine($"  {classification.Explanation}");
         }
 
         MapIdRecord firstRecord = group.First();
 
-        if (firstRecord.X.HasValue && firstRecord.Y.HasValue)
+        if (keyKind == "MapId" && firstRecord.X.HasValue && firstRecord.Y.HasValue)
         {
             Console.WriteLine($"  Pixel: X={firstRecord.X}, Y={firstRecord.Y}");
             Console.WriteLine($"  Derived DFU position: Longitude={firstRecord.Longitude}, Latitude={firstRecord.Latitude}");
+        }
+        else if (keyKind == "LocationId")
+        {
+            Console.WriteLine("  LocationId identity record. DFU also indexes these when enumerating maps.");
+            Console.WriteLine("  If this insert fails, DFU may log the current location MapId rather than the duplicate LocationId.");
         }
         else
         {
@@ -413,6 +448,12 @@ static void PrintConflicts(List<MapIdRecord> records, bool showSingleAssetGroups
             Console.WriteLine($"     Name: {record.RecordName ?? "(unknown)"}");
             Console.WriteLine($"     Source: {entry.Sources}");
 
+            if (identitySummariesByAsset.TryGetValue(GetAssetKey(record), out var identitySummary) && identitySummary is not null)
+            {
+                Console.WriteLine($"     MapId(s): {identitySummary.MapIds}");
+                Console.WriteLine($"     LocationId(s): {identitySummary.LocationIds}");
+            }
+
             if (entry.Count > 1)
                 Console.WriteLine($"     Internal hits: {entry.Count}");
 
@@ -430,12 +471,102 @@ static void PrintConflicts(List<MapIdRecord> records, bool showSingleAssetGroups
     Console.WriteLine($"  Info:     {infoCount}");
 }
 
-static ConflictClassification ClassifyConflict(List<MapIdRecord> records)
+static Dictionary<string, AssetIdentitySummary> BuildIdentitySummaryLookup(List<MapIdRecord> records)
+{
+    return records
+        .GroupBy(GetAssetKey, StringComparer.OrdinalIgnoreCase)
+        .ToDictionary(
+            g => g.Key,
+            g => new AssetIdentitySummary(
+                MapIds: FormatIdentityValues(g, "MapId"),
+                LocationIds: FormatIdentityValues(g, "LocationId")),
+            StringComparer.OrdinalIgnoreCase);
+}
+
+static string FormatIdentityValues(IEnumerable<MapIdRecord> records, string keyKind)
+{
+    var values = records
+        .Where(r => GetCollisionKeyKind(r) == keyKind)
+        .GroupBy(r => r.MapId)
+        .OrderBy(g => g.Key)
+        .Select(g =>
+        {
+            string sources = string.Join(
+                " + ",
+                g.Select(r => r.Source)
+                 .Distinct(StringComparer.OrdinalIgnoreCase)
+                 .OrderBy(source => source));
+
+            return string.IsNullOrWhiteSpace(sources)
+                ? g.Key.ToString()
+                : $"{g.Key} ({sources})";
+        })
+        .ToList();
+
+    return values.Count == 0
+        ? "(none found)"
+        : string.Join(", ", values);
+}
+
+static string GetAssetKey(MapIdRecord record)
+{
+    return $"{record.ModName}|{record.DfmodPath}|{record.AssetName}";
+}
+
+static ConflictClassification ClassifyConflict(List<MapIdRecord> records, string keyKind)
 {
     int newLocationCount = records.Count(r => r.AssetKind == "NewLocation");
     bool hasNewLocation = newLocationCount > 0;
     bool hasBaseline = records.Any(r => r.AssetKind == "Baseline");
     bool hasExistingOverride = records.Any(r => r.AssetKind == "ExistingLocationOverride");
+
+    if (keyKind == "LocationId")
+    {
+        if (hasNewLocation && hasBaseline)
+        {
+            return new ConflictClassification(
+                Severity: "CRITICAL",
+                Title: "Confirmed new-location collision with baseline/vanilla LocationId.",
+                Explanation: "A locationnew-* asset is using a LocationId that is present in the baseline. DFU stores LocationId-to-MapId links while enumerating maps, so this can trigger the same startup failure even when the logged value is the new location's MapId.");
+        }
+
+        if (newLocationCount > 1)
+        {
+            return new ConflictClassification(
+                Severity: "CRITICAL",
+                Title: "New location LocationId collision.",
+                Explanation: "Multiple locationnew-* assets share the same LocationId. New locations should have unique LocationIds as well as unique map-pixel MapIds. DFU can report this as a MapId collision because it logs the current location MapId for either dictionary insert failure.");
+        }
+
+        if (hasNewLocation)
+        {
+            return new ConflictClassification(
+                Severity: "WARNING",
+                Title: "New location shares LocationId with another asset.",
+                Explanation: "The scanner found a shared LocationId involving a locationnew-* asset, but there is no baseline record in this group to prove it is a vanilla collision.");
+        }
+
+        if (hasBaseline && hasExistingOverride)
+        {
+            return new ConflictClassification(
+                Severity: "INFO",
+                Title: "Existing location override overlaps baseline LocationId.",
+                Explanation: "This usually means a mod is intentionally overriding an existing vanilla location. This is normal overwrite behavior.");
+        }
+
+        if (hasExistingOverride)
+        {
+            return new ConflictClassification(
+                Severity: "WARNING",
+                Title: "Multiple existing-location overrides share the same LocationId.",
+                Explanation: "This is probably a normal overwrite-style conflict between mods editing the same existing location, not a new-location startup collision.");
+        }
+
+        return new ConflictClassification(
+            Severity: "WARNING",
+            Title: "Unclassified LocationId overlap.",
+            Explanation: "The scanner found the same LocationId in multiple assets, but could not classify the asset names well enough to determine whether this is dangerous.");
+    }
 
     if (hasNewLocation && hasBaseline)
     {
@@ -489,6 +620,23 @@ static ConflictClassification ClassifyConflict(List<MapIdRecord> records)
         Severity: "WARNING",
         Title: "Unclassified MapId overlap.",
         Explanation: "The scanner found the same MapId in multiple assets, but could not classify the asset names well enough to determine whether this is dangerous.");
+}
+
+static string GetCollisionKeyKind(MapIdRecord record)
+{
+    return record.Source.Contains("LocationId", StringComparison.OrdinalIgnoreCase)
+        ? "LocationId"
+        : "MapId";
+}
+
+static int SortCollisionKeyKind(string keyKind)
+{
+    return keyKind switch
+    {
+        "MapId" => 0,
+        "LocationId" => 1,
+        _ => 2
+    };
 }
 
 static bool ShouldIncludeSeverity(string severity, string minSeverity)
@@ -548,6 +696,7 @@ static void PrintUsage()
     Console.WriteLine("  DaggerfallEdit.Cli --loose <folder>");
     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder>");
     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --filter-mapid <id>");
+    Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --filter-locationid <id>");
     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --baseline <mapids.txt>");
     Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --baseline <mapids.txt> --filter-mapid <id>");
 	Console.WriteLine("  DaggerfallEdit.Cli --mods  <mods-root-folder> --min-severity critical");
@@ -558,6 +707,16 @@ static void PrintUsage()
 	Console.WriteLine("  DaggerfallEdit.Cli --mods <mods-root-folder> --arena2 <arena2-folder> --rebuild-cache");
 	Console.WriteLine("  DaggerfallEdit.Cli --mods <mods-root-folder> --arena2 <arena2-folder> --no-cache");
 }
+
+public sealed record AssetIdentitySummary(
+    string MapIds,
+    string LocationIds
+);
+
+public sealed record CollisionKey(
+    string Kind,
+    int Value
+);
 
 public sealed record ConflictClassification(
     string Severity,
