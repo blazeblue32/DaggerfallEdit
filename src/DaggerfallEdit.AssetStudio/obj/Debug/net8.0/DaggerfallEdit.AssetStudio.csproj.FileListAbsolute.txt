@@ -1,0 +1,16 @@
+C:\Users\Blaze\source\repos\DaggerfallEdit\src\DaggerfallEdit.AssetStudio\bin\Debug\net8.0\DaggerfallEdit.AssetStudio.deps.json
+C:\Users\Blaze\source\repos\DaggerfallEdit\src\DaggerfallEdit.AssetStudio\bin\Debug\net8.0\DaggerfallEdit.AssetStudio.dll
+C:\Users\Blaze\source\repos\DaggerfallEdit\src\DaggerfallEdit.AssetStudio\bin\Debug\net8.0\DaggerfallEdit.AssetStudio.pdb
+C:\Users\Blaze\source\repos\DaggerfallEdit\src\DaggerfallEdit.AssetStudio\bin\Debug\net8.0\DaggerfallEdit.Core.dll
+C:\Users\Blaze\source\repos\DaggerfallEdit\src\DaggerfallEdit.AssetStudio\bin\Debug\net8.0\DaggerfallEdit.Core.pdb
+C:\Users\Blaze\source\repos\DaggerfallEdit\src\DaggerfallEdit.AssetStudio\obj\Debug\net8.0\DaggerfallEdit.AssetStudio.csproj.AssemblyReference.cache
+C:\Users\Blaze\source\repos\DaggerfallEdit\src\DaggerfallEdit.AssetStudio\obj\Debug\net8.0\DaggerfallEdit.AssetStudio.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\Blaze\source\repos\DaggerfallEdit\src\DaggerfallEdit.AssetStudio\obj\Debug\net8.0\DaggerfallEdit.AssetStudio.AssemblyInfoInputs.cache
+C:\Users\Blaze\source\repos\DaggerfallEdit\src\DaggerfallEdit.AssetStudio\obj\Debug\net8.0\DaggerfallEdit.AssetStudio.AssemblyInfo.cs
+C:\Users\Blaze\source\repos\DaggerfallEdit\src\DaggerfallEdit.AssetStudio\obj\Debug\net8.0\DaggerfallEdit.AssetStudio.csproj.CoreCompileInputs.cache
+C:\Users\Blaze\source\repos\DaggerfallEdit\src\DaggerfallEdit.AssetStudio\obj\Debug\net8.0\Daggerfa.2663CFB0.Up2Date
+C:\Users\Blaze\source\repos\DaggerfallEdit\src\DaggerfallEdit.AssetStudio\obj\Debug\net8.0\DaggerfallEdit.AssetStudio.dll
+C:\Users\Blaze\source\repos\DaggerfallEdit\src\DaggerfallEdit.AssetStudio\obj\Debug\net8.0\refint\DaggerfallEdit.AssetStudio.dll
+C:\Users\Blaze\source\repos\DaggerfallEdit\src\DaggerfallEdit.AssetStudio\obj\Debug\net8.0\DaggerfallEdit.AssetStudio.pdb
+C:\Users\Blaze\source\repos\DaggerfallEdit\src\DaggerfallEdit.AssetStudio\obj\Debug\net8.0\ref\DaggerfallEdit.AssetStudio.dll
+C:\Users\Blaze\source\repos\DaggerfallEdit\src\DaggerfallEdit.AssetStudio\bin\Debug\net8.0\AssetStudio.dll

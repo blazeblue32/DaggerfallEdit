@@ -1,0 +1,16 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\DaggerfallEdit.Core\DaggerfallEdit.Core.csproj" />
+    <ProjectReference Include="..\DaggerfallEdit.AssetStudio\DaggerfallEdit.AssetStudio.csproj" />
+    <ProjectReference Include="..\DaggerfallEdit.Vanilla\DaggerfallEdit.Vanilla.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

@@ -1,0 +1,11 @@
+C:\Users\Blaze\source\repos\DaggerfallEdit\src\DaggerfallEdit.Core\bin\Debug\net8.0\DaggerfallEdit.Core.deps.json
+C:\Users\Blaze\source\repos\DaggerfallEdit\src\DaggerfallEdit.Core\bin\Debug\net8.0\DaggerfallEdit.Core.dll
+C:\Users\Blaze\source\repos\DaggerfallEdit\src\DaggerfallEdit.Core\bin\Debug\net8.0\DaggerfallEdit.Core.pdb
+C:\Users\Blaze\source\repos\DaggerfallEdit\src\DaggerfallEdit.Core\obj\Debug\net8.0\DaggerfallEdit.Core.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\Blaze\source\repos\DaggerfallEdit\src\DaggerfallEdit.Core\obj\Debug\net8.0\DaggerfallEdit.Core.AssemblyInfoInputs.cache
+C:\Users\Blaze\source\repos\DaggerfallEdit\src\DaggerfallEdit.Core\obj\Debug\net8.0\DaggerfallEdit.Core.AssemblyInfo.cs
+C:\Users\Blaze\source\repos\DaggerfallEdit\src\DaggerfallEdit.Core\obj\Debug\net8.0\DaggerfallEdit.Core.csproj.CoreCompileInputs.cache
+C:\Users\Blaze\source\repos\DaggerfallEdit\src\DaggerfallEdit.Core\obj\Debug\net8.0\DaggerfallEdit.Core.dll
+C:\Users\Blaze\source\repos\DaggerfallEdit\src\DaggerfallEdit.Core\obj\Debug\net8.0\refint\DaggerfallEdit.Core.dll
+C:\Users\Blaze\source\repos\DaggerfallEdit\src\DaggerfallEdit.Core\obj\Debug\net8.0\DaggerfallEdit.Core.pdb
+C:\Users\Blaze\source\repos\DaggerfallEdit\src\DaggerfallEdit.Core\obj\Debug\net8.0\ref\DaggerfallEdit.Core.dll

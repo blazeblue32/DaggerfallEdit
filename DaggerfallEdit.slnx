@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/DaggerfallEdit.AssetStudio/DaggerfallEdit.AssetStudio.csproj" />
+    <Project Path="src/DaggerfallEdit.Cli/DaggerfallEdit.Cli.csproj" />
+    <Project Path="src/DaggerfallEdit.Core/DaggerfallEdit.Core.csproj" />
+    <Project Path="src/DaggerfallEdit.Vanilla/DaggerfallEdit.Vanilla.csproj" />
+  </Folder>
+</Solution>
